@@ -1,0 +1,139 @@
+# Floor Controller
+
+The floor controller is the local hardware-facing service.
+
+It does not produce game animations. It receives logical board frames from
+`game-engine` over a length-prefixed protobuf stream, then:
+
+- keeps the latest frame in memory
+- refreshes the physical LED floor via UDP at a controller-owned cadence
+- serves the `/live` websocket preview
+- merges tile pressure state into the preview and recordings
+- parses real floor sensor packets
+- accepts browser/touchscreen press simulation
+- records every rendered frame as protobuf
+
+Only one `game-engine` frame stream is accepted at a time. If a second engine
+connects by accident while one is already active, the controller closes the new
+connection immediately so streams cannot race each other.
+
+## Run
+
+For local preview without touching the real floor:
+
+```sh
+go run ./floor-controller/cmd/floor-controller -http :8081 -broadcast-ip 127.0.0.1
+```
+
+Open:
+
+```text
+http://127.0.0.1:8081/live
+```
+
+The server listens on all interfaces when the HTTP address starts with `:`, so
+other machines on the same network can open the LAN URL printed at startup.
+
+For a real floor on the local network, use the default broadcast address:
+
+```sh
+go run ./floor-controller/cmd/floor-controller
+```
+
+The defaults are:
+
+- HTTP preview: `:8080`
+- frame stream TCP listener: `:9090`
+- UDP receive socket: `:7800`
+- LED broadcast: `255.255.255.255:4626`
+- output refresh: `30fps`
+- frame recording directory: `recordings`
+- frame recording compression: `gzip`
+- frame recording rotation: `1 GiB` segments
+- game-engine disconnect fade: hold `2s`, then fade to black over `3s`
+
+Frame recording writes one length-prefixed protobuf `FrameRecord` for every
+controller-presented frame after pressure state has been merged. The recorded
+sequence and timestamp come from the controller presentation clock, not the
+source game frame.
+
+The default recording target creates one or more timestamped segment files per
+run:
+
+```text
+recordings/20260602T154530Z.frames.pbstream.gz
+recordings/20260602T154530Z-000002.frames.pbstream.gz
+```
+
+Passing `recordings/live.frames.pbstream` also resolves to a timestamped
+session file for compatibility with early runs. Disable recording with:
+
+```sh
+go run ./floor-controller/cmd/floor-controller -record-frames ""
+```
+
+Compression is a controller startup setting, not a browser control:
+
+```sh
+go run ./floor-controller/cmd/floor-controller -record-compression gzip
+go run ./floor-controller/cmd/floor-controller -record-compression none
+```
+
+Segments rotate before they would exceed the configured byte limit:
+
+```sh
+go run ./floor-controller/cmd/floor-controller -record-segment-bytes 1073741824
+```
+
+Tune the hardware, preview, and recording cadence with:
+
+```sh
+go run ./floor-controller/cmd/floor-controller -refresh-fps 30
+```
+
+If the game-engine connection drops, the controller keeps refreshing the latest
+frame briefly, then fades the hardware and live preview to black:
+
+```sh
+go run ./floor-controller/cmd/floor-controller -engine-fade-delay 2s -engine-fade-duration 3s
+```
+
+Uncompressed recordings at the current 16x32 protobuf shape are roughly 6.5 KB
+per frame, or about 0.7 GB per hour at 30fps. Gzip compression is enabled by
+default and is usually much smaller for synthetic animations, but the exact
+ratio depends on the game visuals and pressure changes. With gzip, each frame is
+written as a complete gzip member and flushed after the frame. A sudden process
+crash can leave the final in-flight frame incomplete, but previously completed
+frames remain recoverable. Recording writes run on a background worker so disk
+IO does not block the controller presentation loop. If the disk falls behind for
+an extended period, recording frames may be dropped instead of slowing LED
+output.
+
+## Status
+
+The controller exposes live operational status as JSON:
+
+```text
+http://127.0.0.1:8081/status
+```
+
+Status includes presented frame count, measured FPS, latest game-frame age,
+game-engine connection/fade state, websocket client count, UDP send errors, and
+recording compression, current segment size/index, and queue/drop health.
+
+The process handles `SIGINT` and `SIGTERM` so the recorder can flush and close
+cleanly.
+
+## Live Viewer Protocol
+
+The browser viewer uses websocket text messages for control and input events:
+
+- `config`: controller-owned runtime settings
+- `pressure`: immediate press/release changes from the floor or browser
+
+Rendered frames are websocket binary messages. Each binary frame starts with a
+fixed `MLF1` header, followed by packed RGB bytes and a pressure bitset. This
+keeps `/live` lightweight without adding protobuf tooling to the browser.
+
+See `docs/protocol/live-viewer.md` and `docs/protocol/pressure-events.md` for
+the protocol details.

@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Motion Levels Engine Preview</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #0e1116;
+        color: #f4f7fb;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        overflow: hidden;
+      }
+
+      main {
+        width: 100vw;
+        height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #05070a;
+      }
+
+      .chrome {
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        right: 10px;
+        z-index: 2;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        justify-content: flex-end;
+        min-width: 0;
+        pointer-events: none;
+      }
+
+      #status {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #64748b;
+        box-shadow: 0 0 0 1px rgba(5, 7, 10, 0.65);
+      }
+
+      #status.live {
+        background: #36d66b;
+        box-shadow: 0 0 10px rgba(54, 214, 107, 0.85);
+      }
+
+      #status.error {
+        background: #ff5c5c;
+        box-shadow: 0 0 10px rgba(255, 92, 92, 0.75);
+      }
+
+      #config {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        color: rgba(244, 247, 251, 0.72);
+        font: 600 10px/1.1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        letter-spacing: 0;
+        text-overflow: ellipsis;
+        text-transform: uppercase;
+        white-space: nowrap;
+        text-shadow: 0 1px 3px rgba(5, 7, 10, 0.85);
+      }
+
+      #fullscreen {
+        flex: 0 0 32px;
+        width: 34px;
+        height: 34px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 6px;
+        background: rgba(7, 10, 15, 0.52);
+        color: #f4f7fb;
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+        pointer-events: auto;
+        backdrop-filter: blur(8px);
+      }
+
+      #fullscreen:hover {
+        background: rgba(20, 28, 42, 0.75);
+      }
+
+      #fullscreen:focus-visible {
+        outline: 2px solid rgba(255, 255, 255, 0.85);
+        outline-offset: 2px;
+      }
+
+      .fullscreen-icon {
+        width: 20px;
+        height: 20px;
+        display: block;
+      }
+
+      .fullscreen-icon path {
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .fullscreen-icon.exit,
+      #fullscreen[aria-pressed="true"] .fullscreen-icon.enter {
+        display: none;
+      }
+
+      #fullscreen[aria-pressed="true"] .fullscreen-icon.exit {
+        display: block;
+      }
+
+      #board {
+        position: relative;
+        display: grid;
+        grid-template-columns: repeat(var(--board-cols, 32), minmax(0, 1fr));
+        grid-template-rows: repeat(var(--board-rows, 16), minmax(0, 1fr));
+        gap: 2px;
+        aspect-ratio: var(--board-cols, 32) / var(--board-rows, 16);
+        width: min(100vw, calc(100vh * var(--board-aspect, 2)));
+        height: min(100vh, calc(100vw / var(--board-aspect, 2)));
+        background: #05070a;
+        touch-action: none;
+        user-select: none;
+      }
+
+      .tile {
+        background: #111827;
+        min-width: 0;
+        min-height: 0;
+        box-shadow: inset 0 0 0 0 rgba(255, 46, 46, 0);
+      }
+
+      .tile.pressed {
+        box-shadow:
+          inset 0 0 0 3px #ff3030,
+          0 0 10px rgba(255, 48, 48, 0.7);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="chrome">
+        <div id="status" aria-label="Connection status"></div>
+        <div id="config" aria-label="Controller configuration"></div>
+        <button id="fullscreen" type="button" aria-label="Toggle fullscreen" aria-pressed="false" title="Fullscreen">
+          <svg class="fullscreen-icon enter" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 8 4 4" />
+            <path d="M4 4h5" />
+            <path d="M4 4v5" />
+            <path d="m16 8 4-4" />
+            <path d="M20 4h-5" />
+            <path d="M20 4v5" />
+            <path d="m8 16-4 4" />
+            <path d="M4 20h5" />
+            <path d="M4 20v-5" />
+            <path d="m16 16 4 4" />
+            <path d="M20 20h-5" />
+            <path d="M20 20v-5" />
+          </svg>
+          <svg class="fullscreen-icon exit" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m4 8 4 4" />
+            <path d="M8 12H3" />
+            <path d="M8 12V7" />
+            <path d="m20 8-4 4" />
+            <path d="M16 12h5" />
+            <path d="M16 12V7" />
+            <path d="m4 16 4-4" />
+            <path d="M8 12H3" />
+            <path d="M8 12v5" />
+            <path d="m20 16-4-4" />
+            <path d="M16 12h5" />
+            <path d="M16 12v5" />
+          </svg>
+        </button>
+      </div>
+      <div id="board" aria-label="LED floor preview"></div>
+    </main>
+
+    <script>
+      const width = 16;
+      const height = 32;
+      const board = document.getElementById("board");
+      const statusEl = document.getElementById("status");
+      const configEl = document.getElementById("config");
+      const fullscreenButton = document.getElementById("fullscreen");
+      const tiles = new Map();
+      const activePointers = new Map();
+      let socket;
+      let orientation = "";
+      let controllerConfig;
+      let controllerStatus;
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const tile = document.createElement("div");
+          tile.className = "tile";
+          tile.dataset.key = `${x},${y}`;
+          board.appendChild(tile);
+          tiles.set(tile.dataset.key, tile);
+        }
+      }
+
+      function applyOrientation() {
+        const nextOrientation = window.innerWidth >= window.innerHeight ? "landscape" : "portrait";
+        if (nextOrientation === orientation) return;
+        orientation = nextOrientation;
+
+        const cols = orientation === "landscape" ? height : width;
+        const rows = orientation === "landscape" ? width : height;
+        board.style.setProperty("--board-cols", cols);
+        board.style.setProperty("--board-rows", rows);
+        board.style.setProperty("--board-aspect", cols / rows);
+
+        for (const tile of tiles.values()) {
+          const [x, y] = tile.dataset.key.split(",").map(Number);
+          tile.style.gridColumn = orientation === "landscape" ? y + 1 : x + 1;
+          tile.style.gridRow = orientation === "landscape" ? x + 1 : y + 1;
+        }
+      }
+
+      function connect() {
+        const protocol = location.protocol === "https:" ? "wss" : "ws";
+        socket = new WebSocket(`${protocol}://${location.host}/ws`);
+        socket.binaryType = "arraybuffer";
+
+        socket.addEventListener("open", () => {
+          statusEl.className = "live";
+        });
+
+        socket.addEventListener("message", (event) => {
+          if (event.data instanceof ArrayBuffer) {
+            renderFrame(event.data);
+            return;
+          }
+          const message = JSON.parse(event.data);
+          if (message.type === "config") {
+            updateConfig(message);
+            return;
+          }
+          if (message.type === "status") {
+            updateStatus(message);
+            return;
+          }
+          if (message.type === "pressure") {
+            setPressure(message.x, message.y, message.pressed);
+          }
+        });
+
+        socket.addEventListener("close", () => {
+          statusEl.className = "";
+          window.setTimeout(connect, 500);
+        });
+
+        socket.addEventListener("error", () => {
+          statusEl.className = "error";
+        });
+      }
+
+      function renderFrame(buffer) {
+        const view = new DataView(buffer);
+        if (
+          view.byteLength < 16 ||
+          view.getUint8(0) !== 77 ||
+          view.getUint8(1) !== 76 ||
+          view.getUint8(2) !== 70 ||
+          view.getUint8(3) !== 49
+        ) {
+          return;
+        }
+
+        const frameWidth = view.getUint16(8, true);
+        const frameHeight = view.getUint16(10, true);
+        const flags = view.getUint8(12);
+        const headerLength = view.getUint16(14, true);
+        const tileCount = frameWidth * frameHeight;
+        const rgbOffset = headerLength;
+        const pressureOffset = rgbOffset + tileCount * 3;
+        if (view.byteLength < pressureOffset) return;
+
+        const bytes = new Uint8Array(buffer);
+        const hasPressure = Boolean(flags & 1) && bytes.length >= pressureOffset + Math.ceil(tileCount / 8);
+        for (let index = 0; index < tileCount; index++) {
+          const x = index % frameWidth;
+          const y = Math.floor(index / frameWidth);
+          const tile = tiles.get(`${x},${y}`);
+          if (!tile) continue;
+
+          const rgbIndex = rgbOffset + index * 3;
+          tile.style.backgroundColor = `rgb(${bytes[rgbIndex]}, ${bytes[rgbIndex + 1]}, ${bytes[rgbIndex + 2]})`;
+          if (hasPressure) {
+            const pressed = Boolean(bytes[pressureOffset + Math.floor(index / 8)] & (1 << (index % 8)));
+            tile.classList.toggle("pressed", pressed);
+          }
+        }
+      }
+
+      function setPressure(x, y, pressed) {
+        const tile = tiles.get(`${x},${y}`);
+        if (!tile) return;
+        tile.classList.toggle("pressed", Boolean(pressed));
+      }
+
+      function updateConfig(config) {
+        controllerConfig = config;
+        renderControllerText();
+      }
+
+      function updateStatus(status) {
+        controllerStatus = status;
+        renderControllerText();
+      }
+
+      function renderControllerText() {
+        if (!controllerConfig) return;
+        const config = controllerConfig;
+        const status = controllerStatus;
+        const compression = status?.recording?.compression || config.compression;
+        const recording = config.recording && compression && compression !== "none" ? `rec ${compression}` : config.recording ? "rec" : "no rec";
+        const parts = [
+          `${config.refreshFps} fps`,
+          `${config.gridWidth}x${config.gridHeight}`,
+          config.broadcastAddr,
+          `rx :${config.recvPort}`,
+          `tcp ${config.frameAddr}`,
+          recording,
+        ];
+        if (status?.recording) {
+          parts.push(`q${status.recording.queueDepth}`);
+          parts.push(`d${status.recording.droppedFrames}`);
+        }
+        if (status && !status.gameEngineOnline && status.engineFadeAmount > 0) {
+          parts.push(`fade ${Math.round(status.engineFadeAmount * 100)}%`);
+        }
+        configEl.textContent = parts.join("  ");
+      }
+
+      fullscreenButton.addEventListener("click", async () => {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+          return;
+        }
+        await document.documentElement.requestFullscreen();
+      });
+
+      document.addEventListener("fullscreenchange", () => {
+        const isFullscreen = Boolean(document.fullscreenElement);
+        fullscreenButton.setAttribute("aria-pressed", String(isFullscreen));
+        fullscreenButton.title = isFullscreen ? "Exit fullscreen" : "Fullscreen";
+      });
+
+      function tileFromEvent(event) {
+        const element = document.elementFromPoint(event.clientX, event.clientY);
+        if (!element || !element.classList.contains("tile")) return null;
+        return element;
+      }
+
+      function sendPress(tile, pressed) {
+        if (!tile || !socket || socket.readyState !== WebSocket.OPEN) return;
+        const [x, y] = tile.dataset.key.split(",").map(Number);
+        socket.send(JSON.stringify({ type: "press", x, y, pressed }));
+        tile.classList.toggle("pressed", pressed);
+      }
+
+      board.addEventListener("pointerdown", (event) => {
+        const tile = tileFromEvent(event);
+        if (!tile) return;
+        event.preventDefault();
+        board.setPointerCapture(event.pointerId);
+        activePointers.set(event.pointerId, tile.dataset.key);
+        sendPress(tile, true);
+      });
+
+      board.addEventListener("pointermove", (event) => {
+        if (!activePointers.has(event.pointerId)) return;
+        const tile = tileFromEvent(event);
+        const previousKey = activePointers.get(event.pointerId);
+        const nextKey = tile?.dataset.key;
+        if (!nextKey || nextKey === previousKey) return;
+        event.preventDefault();
+        sendPress(tiles.get(previousKey), false);
+        activePointers.set(event.pointerId, nextKey);
+        sendPress(tile, true);
+      });
+
+      function releasePointer(event) {
+        const previousKey = activePointers.get(event.pointerId);
+        if (!previousKey) return;
+        event.preventDefault();
+        sendPress(tiles.get(previousKey), false);
+        activePointers.delete(event.pointerId);
+        if (board.hasPointerCapture(event.pointerId)) {
+          board.releasePointerCapture(event.pointerId);
+        }
+      }
+
+      board.addEventListener("pointerup", releasePointer);
+      board.addEventListener("pointercancel", releasePointer);
+      board.addEventListener("pointerleave", (event) => {
+        if (activePointers.has(event.pointerId)) {
+          releasePointer(event);
+        }
+      });
+
+      applyOrientation();
+      window.addEventListener("resize", applyOrientation);
+      window.addEventListener("orientationchange", applyOrientation);
+      connect();
+    </script>
+  </body>
+</html>
