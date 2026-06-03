@@ -328,8 +328,20 @@
         const config = controllerConfig;
         const status = controllerStatus;
         const compression = status?.recording?.compression || config.compression;
-        const recording = config.recording && compression && compression !== "none" ? `rec ${compression}` : config.recording ? "rec" : "no rec";
+        const postCompression = status?.recording?.postCompression || config.postCompression;
+        const recording =
+          config.recording && postCompression && postCompression !== "none"
+            ? compression && compression !== "none"
+              ? `rec ${compression}->${postCompression}`
+              : `rec ${postCompression}`
+            : config.recording && compression && compression !== "none"
+              ? `rec ${compression}`
+              : config.recording
+                ? "rec"
+                : "no rec";
+        const controllerId = status?.controllerId || config.controllerId;
         const parts = [
+          controllerId ? `id ${controllerId.slice(0, 8)}` : "id unknown",
           `${config.refreshFps} fps`,
           `${config.gridWidth}x${config.gridHeight}`,
           config.broadcastAddr,

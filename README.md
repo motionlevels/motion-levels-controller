@@ -46,10 +46,14 @@ The defaults are:
 - frame stream TCP listener: `:9090`
 - UDP receive socket: `:7800`
 - LED broadcast: `255.255.255.255:4626`
+- controller ID file: `.motion-levels-controller-id`
 - output refresh: `30fps`
 - frame recording directory: `recordings`
-- frame recording compression: `gzip`
-- frame recording rotation: `1 GiB` segments
+- hot-path frame recording compression: `none`
+- background recording compression: `zstd`
+- frame recording rotation: `10m` or `256 MiB`, whichever comes first
+- raw recording cleanup: `1h` after verified `.zst` exists
+- pending raw recording cap: `4 GiB`
 - game-engine disconnect fade: hold `2s`, then fade to black over `3s`
 
 Frame recording writes one length-prefixed protobuf `FrameRecord` for every
@@ -58,11 +62,13 @@ sequence and timestamp come from the controller presentation clock, not the
 source game frame.
 
 The default recording target creates one or more timestamped segment files per
-run:
+run under the stable controller UUID:
 
 ```text
-recordings/20260602T154530Z.frames.pbstream.gz
-recordings/20260602T154530Z-000002.frames.pbstream.gz
+recordings/01234567-89ab-4def-8123-456789abcdef/20260602T154530Z.frames.pbstream.open
+recordings/01234567-89ab-4def-8123-456789abcdef/20260602T154530Z.frames.pbstream
+recordings/01234567-89ab-4def-8123-456789abcdef/20260602T154530Z.frames.pbstream.zst
+recordings/01234567-89ab-4def-8123-456789abcdef/20260602T154530Z-000002.frames.pbstream.zst
 ```
 
 Passing `recordings/live.frames.pbstream` also resolves to a timestamped
@@ -72,17 +78,50 @@ session file for compatibility with early runs. Disable recording with:
 go run ./floor-controller/cmd/floor-controller -record-frames ""
 ```
 
-Compression is a controller startup setting, not a browser control:
+The controller ID is generated once and reused on later starts:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -record-compression gzip
-go run ./floor-controller/cmd/floor-controller -record-compression none
+go run ./floor-controller/cmd/floor-controller -controller-id-file .motion-levels-controller-id
 ```
 
-Segments rotate before they would exceed the configured byte limit:
+For a deployed controller, keep this file outside the git checkout so updates do
+not change the identity:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -record-segment-bytes 1073741824
+go run ./floor-controller/cmd/floor-controller \
+  -controller-id-file /var/lib/motion-levels/floor-controller/controller-id
+```
+
+If recordings should sync to Google Drive, point `-record-frames` at the local
+synced Drive recordings directory. The controller will still create the
+controller UUID subdirectory inside it.
+
+The controller writes raw protobuf on the presentation path by default, then
+compresses closed segments with `zstd` in a background worker:
+
+```sh
+go run ./floor-controller/cmd/floor-controller -record-compression none
+go run ./floor-controller/cmd/floor-controller -record-post-compression zstd
+```
+
+Segments rotate before they would exceed the configured byte limit or duration:
+
+```sh
+go run ./floor-controller/cmd/floor-controller -record-segment-bytes 268435456 -record-segment-duration 10m
+```
+
+Raw `.pbstream` files are deleted one hour after a verified `.zst` exists:
+
+```sh
+go run ./floor-controller/cmd/floor-controller -record-delete-raw-after 1h
+```
+
+If compression is broken or falls behind, raw files are allowed to accumulate
+only up to the configured cap. After that, recording stops instead of risking
+the whole machine running out of storage:
+
+```sh
+go run ./floor-controller/cmd/floor-controller -record-max-pending-raw-bytes 4294967296
 ```
 
 Tune the hardware, preview, and recording cadence with:
@@ -99,15 +138,15 @@ go run ./floor-controller/cmd/floor-controller -engine-fade-delay 2s -engine-fad
 ```
 
 Uncompressed recordings at the current 16x32 protobuf shape are roughly 6.5 KB
-per frame, or about 0.7 GB per hour at 30fps. Gzip compression is enabled by
-default and is usually much smaller for synthetic animations, but the exact
-ratio depends on the game visuals and pressure changes. With gzip, each frame is
-written as a complete gzip member and flushed after the frame. A sudden process
-crash can leave the final in-flight frame incomplete, but previously completed
-frames remain recoverable. Recording writes run on a background worker so disk
-IO does not block the controller presentation loop. If the disk falls behind for
-an extended period, recording frames may be dropped instead of slowing LED
-output.
+per frame, or about 0.7 GB per hour at 30fps. Whole-segment `zstd` compression
+is much more effective for looping animations than per-frame gzip, but it runs
+outside the presentation loop. A sudden process crash can leave the final
+in-flight frame incomplete, but previously completed frames remain recoverable.
+On startup, stale `.open` files are finalized and `.zst.tmp` files are removed
+so closed raw segments can be compressed again. Recording writes run on a
+background worker so disk IO does not block the controller presentation loop.
+If the disk falls behind for an extended period, recording frames may be dropped
+instead of slowing LED output.
 
 ## Status
 
@@ -119,7 +158,8 @@ http://127.0.0.1:8081/status
 
 Status includes presented frame count, measured FPS, latest game-frame age,
 game-engine connection/fade state, websocket client count, UDP send errors, and
-recording compression, current segment size/index, and queue/drop health.
+controller ID, recording compression, post-compression, current segment
+size/index, pending raw bytes, compression queue health, and queue/drop health.
 
 The process handles `SIGINT` and `SIGTERM` so the recorder can flush and close
 cleanly.

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/lobis/motion-levels/floor-controller/internal/controllerid"
 	"github.com/lobis/motion-levels/floor-controller/internal/floor"
 	"github.com/lobis/motion-levels/floor-controller/internal/recording"
 	"github.com/lobis/motion-levels/packages/contracts/pbstream"
@@ -34,17 +35,24 @@ import (
 var webFS embed.FS
 
 type config struct {
-	HTTPAddr           string
-	FrameAddr          string
-	RecvPort           int
-	BroadcastIP        string
-	BroadcastPort      int
-	RecordFrames       string
-	RecordCompression  string
-	RecordSegmentBytes int64
-	RefreshFPS         int
-	EngineFadeDelay    time.Duration
-	EngineFadeDuration time.Duration
+	HTTPAddr                 string
+	FrameAddr                string
+	RecvPort                 int
+	BroadcastIP              string
+	BroadcastPort            int
+	ControllerID             string
+	ControllerIDFile         string
+	RecordFrames             string
+	RecordCompression        string
+	RecordPostCompression    string
+	RecordSegmentBytes       int64
+	RecordSegmentDuration    time.Duration
+	RecordDeleteRawAfter     time.Duration
+	RecordMaxPendingRawBytes int64
+	ZstdPath                 string
+	RefreshFPS               int
+	EngineFadeDelay          time.Duration
+	EngineFadeDuration       time.Duration
 }
 
 type websocketHub struct {
@@ -109,15 +117,17 @@ type inputMessage struct {
 }
 
 type configMessage struct {
-	Type          string `json:"type"`
-	RefreshFPS    int    `json:"refreshFps"`
-	GridWidth     int    `json:"gridWidth"`
-	GridHeight    int    `json:"gridHeight"`
-	FrameAddr     string `json:"frameAddr"`
-	RecvPort      int    `json:"recvPort"`
-	BroadcastAddr string `json:"broadcastAddr"`
-	Recording     bool   `json:"recording"`
-	Compression   string `json:"compression"`
+	Type            string `json:"type"`
+	RefreshFPS      int    `json:"refreshFps"`
+	GridWidth       int    `json:"gridWidth"`
+	GridHeight      int    `json:"gridHeight"`
+	FrameAddr       string `json:"frameAddr"`
+	RecvPort        int    `json:"recvPort"`
+	BroadcastAddr   string `json:"broadcastAddr"`
+	ControllerID    string `json:"controllerId"`
+	Recording       bool   `json:"recording"`
+	Compression     string `json:"compression"`
+	PostCompression string `json:"postCompression"`
 }
 
 type statusMessage struct {
@@ -131,6 +141,7 @@ type statusMessage struct {
 	GameFrameSequence uint64          `json:"gameFrameSequence"`
 	GameEngineOnline  bool            `json:"gameEngineOnline"`
 	EngineFadeAmount  float64         `json:"engineFadeAmount"`
+	ControllerID      string          `json:"controllerId"`
 	Recording         recording.Stats `json:"recording"`
 }
 
@@ -163,9 +174,16 @@ func parseConfig() config {
 	flag.IntVar(&cfg.RecvPort, "recv-port", 7800, "UDP port for tile handshake/sensor packets")
 	flag.StringVar(&cfg.BroadcastIP, "broadcast-ip", "255.255.255.255", "UDP broadcast IP for LED packets")
 	flag.IntVar(&cfg.BroadcastPort, "broadcast-port", 4626, "UDP broadcast port for LED packets")
+	flag.StringVar(&cfg.ControllerID, "controller-id", "", "stable controller UUID override; normally leave empty and use controller-id-file")
+	flag.StringVar(&cfg.ControllerIDFile, "controller-id-file", controllerid.DefaultPath, "file used to persist this controller's generated UUID")
 	flag.StringVar(&cfg.RecordFrames, "record-frames", "recordings", "recording directory or .pbstream file; empty disables recording")
-	flag.StringVar(&cfg.RecordCompression, "record-compression", "gzip", "recording compression: gzip or none")
+	flag.StringVar(&cfg.RecordCompression, "record-compression", "none", "hot-path recording compression: none or gzip")
+	flag.StringVar(&cfg.RecordPostCompression, "record-post-compression", "zstd", "background compression for closed recording segments: zstd or none")
 	flag.Int64Var(&cfg.RecordSegmentBytes, "record-segment-bytes", recording.DefaultMaxSegmentBytes, "maximum recording segment size in bytes before rotating")
+	flag.DurationVar(&cfg.RecordSegmentDuration, "record-segment-duration", recording.DefaultMaxSegmentDuration, "maximum recording segment duration before rotating")
+	flag.DurationVar(&cfg.RecordDeleteRawAfter, "record-delete-raw-after", recording.DefaultDeleteRawAfter, "delete raw segment this long after verified compressed segment exists")
+	flag.Int64Var(&cfg.RecordMaxPendingRawBytes, "record-max-pending-raw-bytes", recording.DefaultMaxPendingRawBytes, "maximum active and closed raw recording bytes before recording stops")
+	flag.StringVar(&cfg.ZstdPath, "zstd-path", "zstd", "path to zstd executable for background recording compression")
 	flag.IntVar(&cfg.RefreshFPS, "refresh-fps", 30, "floor-controller output refresh rate for UDP, websocket, and recording")
 	flag.DurationVar(&cfg.EngineFadeDelay, "engine-fade-delay", 2*time.Second, "time to hold the last game frame after the game-engine disconnects before fading")
 	flag.DurationVar(&cfg.EngineFadeDuration, "engine-fade-duration", 3*time.Second, "duration of the fade to black after engine-fade-delay")
@@ -187,8 +205,20 @@ func (c config) validate() error {
 	if !recording.SupportedCompression(c.RecordCompression) {
 		errs = append(errs, fmt.Errorf("record-compression must be gzip or none"))
 	}
+	if !recording.SupportedPostCompression(c.RecordPostCompression) {
+		errs = append(errs, fmt.Errorf("record-post-compression must be zstd or none"))
+	}
 	if c.RecordSegmentBytes < 1 {
 		errs = append(errs, fmt.Errorf("record-segment-bytes must be at least 1"))
+	}
+	if c.RecordSegmentDuration <= 0 {
+		errs = append(errs, fmt.Errorf("record-segment-duration must be positive"))
+	}
+	if c.RecordDeleteRawAfter < 0 {
+		errs = append(errs, fmt.Errorf("record-delete-raw-after must be non-negative"))
+	}
+	if c.RecordMaxPendingRawBytes < 1 {
+		errs = append(errs, fmt.Errorf("record-max-pending-raw-bytes must be at least 1"))
 	}
 	if c.EngineFadeDelay < 0 {
 		errs = append(errs, fmt.Errorf("engine-fade-delay must be non-negative"))
@@ -206,6 +236,12 @@ func (c config) validate() error {
 }
 
 func run(ctx context.Context, cfg config) error {
+	resolvedControllerID, err := controllerid.Resolve(cfg.ControllerIDFile, cfg.ControllerID)
+	if err != nil {
+		return err
+	}
+	cfg.ControllerID = resolvedControllerID
+
 	conn, err := openUDP(cfg.RecvPort)
 	if err != nil {
 		return err
@@ -218,8 +254,14 @@ func run(ctx context.Context, cfg config) error {
 	state := &controllerState{sensorState: make(map[sensorKey]bool)}
 	frames := &latestFrameBuffer{}
 	frameRecorder, err := recording.NewFrameRecorderWithOptions(cfg.RecordFrames, recording.Options{
-		Compression:     cfg.RecordCompression,
-		MaxSegmentBytes: cfg.RecordSegmentBytes,
+		Compression:        cfg.RecordCompression,
+		PostCompression:    cfg.RecordPostCompression,
+		ZstdPath:           cfg.ZstdPath,
+		MaxSegmentBytes:    cfg.RecordSegmentBytes,
+		MaxSegmentDuration: cfg.RecordSegmentDuration,
+		DeleteRawAfter:     cfg.RecordDeleteRawAfter,
+		MaxPendingRawBytes: cfg.RecordMaxPendingRawBytes,
+		ControllerID:       cfg.ControllerID,
 	})
 	if err != nil {
 		return err
@@ -228,6 +270,7 @@ func run(ctx context.Context, cfg config) error {
 	if cfg.RecordFrames != "" {
 		log.Printf("frame recording: %s", frameRecorder.Path())
 	}
+	log.Printf("controller id: %s", cfg.ControllerID)
 	log.Printf("config: %s recording=%s", cfg, frameRecorder.Path())
 
 	go metricsLoop(ctx, metrics)
@@ -506,6 +549,7 @@ func snapshotStatus(metrics *controllerMetrics, cfg config, hub *websocketHub, r
 		GameFrameSequence: metrics.lastGameFrameSequence.Load(),
 		GameEngineOnline:  metrics.gameEngineOnline(),
 		EngineFadeAmount:  metrics.engineFadeAmount(now, cfg.EngineFadeDelay, cfg.EngineFadeDuration),
+		ControllerID:      cfg.ControllerID,
 		Recording:         recorder.Stats(),
 	}
 }
@@ -710,15 +754,17 @@ func (b *latestFrameBuffer) snapshot() (*recordingpb.FrameRecord, bool) {
 
 func (c config) configMessage() configMessage {
 	return configMessage{
-		Type:          "config",
-		RefreshFPS:    c.RefreshFPS,
-		GridWidth:     floor.GridWidth,
-		GridHeight:    floor.GridHeight,
-		FrameAddr:     c.FrameAddr,
-		RecvPort:      c.RecvPort,
-		BroadcastAddr: fmt.Sprintf("%s:%d", c.BroadcastIP, c.BroadcastPort),
-		Recording:     c.RecordFrames != "",
-		Compression:   recording.NormalizeCompression(c.RecordCompression),
+		Type:            "config",
+		RefreshFPS:      c.RefreshFPS,
+		GridWidth:       floor.GridWidth,
+		GridHeight:      floor.GridHeight,
+		FrameAddr:       c.FrameAddr,
+		RecvPort:        c.RecvPort,
+		BroadcastAddr:   fmt.Sprintf("%s:%d", c.BroadcastIP, c.BroadcastPort),
+		ControllerID:    c.ControllerID,
+		Recording:       c.RecordFrames != "",
+		Compression:     recording.NormalizeCompression(c.RecordCompression),
+		PostCompression: recording.NormalizePostCompression(c.RecordPostCompression),
 	}
 }
 
@@ -936,5 +982,5 @@ func (s *controllerState) snapshotPressed() [floor.GridHeight][floor.GridWidth]b
 }
 
 func (c config) String() string {
-	return fmt.Sprintf("http=%s frames=%s refresh=%dfps udp=:%d broadcast=%s:%d record-compression=%s record-segment-bytes=%d fade=%s+%s", c.HTTPAddr, c.FrameAddr, c.RefreshFPS, c.RecvPort, c.BroadcastIP, c.BroadcastPort, recording.NormalizeCompression(c.RecordCompression), c.RecordSegmentBytes, c.EngineFadeDelay, c.EngineFadeDuration)
+	return fmt.Sprintf("controller-id=%s http=%s frames=%s refresh=%dfps udp=:%d broadcast=%s:%d record-compression=%s post-compression=%s record-segment-bytes=%d record-segment-duration=%s delete-raw-after=%s max-pending-raw=%d fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.RefreshFPS, c.RecvPort, c.BroadcastIP, c.BroadcastPort, recording.NormalizeCompression(c.RecordCompression), recording.NormalizePostCompression(c.RecordPostCompression), c.RecordSegmentBytes, c.RecordSegmentDuration, c.RecordDeleteRawAfter, c.RecordMaxPendingRawBytes, c.EngineFadeDelay, c.EngineFadeDuration)
 }
