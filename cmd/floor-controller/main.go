@@ -26,6 +26,7 @@ import (
 	"github.com/lobis/motion-levels/floor-controller/internal/controllerid"
 	"github.com/lobis/motion-levels/floor-controller/internal/floor"
 	"github.com/lobis/motion-levels/floor-controller/internal/recording"
+	"github.com/lobis/motion-levels/packages/contracts/inputpb"
 	"github.com/lobis/motion-levels/packages/contracts/pbstream"
 	"github.com/lobis/motion-levels/packages/contracts/recordingpb"
 	"google.golang.org/protobuf/proto"
@@ -37,6 +38,7 @@ var webFS embed.FS
 type config struct {
 	HTTPAddr                 string
 	FrameAddr                string
+	InputAddr                string
 	RecvPort                 int
 	BroadcastIP              string
 	BroadcastPort            int
@@ -56,9 +58,21 @@ type config struct {
 }
 
 type websocketHub struct {
+	mu              sync.Mutex
+	clients         map[*websocket.Conn]bool
+	config          configMessage
+	pressureStreams *pressureStreamHub
+}
+
+type pressureStreamHub struct {
 	mu      sync.Mutex
-	clients map[*websocket.Conn]bool
-	config  configMessage
+	clients map[*pressureStreamClient]bool
+	seq     uint64
+}
+
+type pressureStreamClient struct {
+	conn net.Conn
+	jobs chan *inputpb.PressureEvent
 }
 
 type controllerMetrics struct {
@@ -122,6 +136,7 @@ type configMessage struct {
 	GridWidth       int    `json:"gridWidth"`
 	GridHeight      int    `json:"gridHeight"`
 	FrameAddr       string `json:"frameAddr"`
+	InputAddr       string `json:"inputAddr"`
 	RecvPort        int    `json:"recvPort"`
 	BroadcastAddr   string `json:"broadcastAddr"`
 	ControllerID    string `json:"controllerId"`
@@ -171,6 +186,7 @@ func parseConfig() config {
 	cfg := config{}
 	flag.StringVar(&cfg.HTTPAddr, "http", ":8080", "HTTP address for websocket preview")
 	flag.StringVar(&cfg.FrameAddr, "frames", ":9090", "TCP address for length-prefixed protobuf frame stream")
+	flag.StringVar(&cfg.InputAddr, "input-events", ":9091", "TCP address for pressure event subscribers; empty disables")
 	flag.IntVar(&cfg.RecvPort, "recv-port", 7800, "UDP port for tile handshake/sensor packets")
 	flag.StringVar(&cfg.BroadcastIP, "broadcast-ip", "255.255.255.255", "UDP broadcast IP for LED packets")
 	flag.IntVar(&cfg.BroadcastPort, "broadcast-port", 4626, "UDP broadcast port for LED packets")
@@ -250,7 +266,8 @@ func run(ctx context.Context, cfg config) error {
 
 	broadcastAddr := &net.UDPAddr{IP: net.ParseIP(cfg.BroadcastIP), Port: cfg.BroadcastPort}
 	metrics := newControllerMetrics()
-	hub := &websocketHub{clients: make(map[*websocket.Conn]bool), config: cfg.configMessage()}
+	pressureStreams := &pressureStreamHub{clients: make(map[*pressureStreamClient]bool)}
+	hub := &websocketHub{clients: make(map[*websocket.Conn]bool), config: cfg.configMessage(), pressureStreams: pressureStreams}
 	state := &controllerState{sensorState: make(map[sensorKey]bool)}
 	frames := &latestFrameBuffer{}
 	frameRecorder, err := recording.NewFrameRecorderWithOptions(cfg.RecordFrames, recording.Options{
@@ -275,8 +292,9 @@ func run(ctx context.Context, cfg config) error {
 
 	go metricsLoop(ctx, metrics)
 	go statusLoop(ctx, cfg, hub, metrics, frameRecorder)
-	go readUDP(ctx, conn, state, hub)
+	go readUDP(ctx, conn, state, hub, pressureStreams)
 	go serveHTTP(ctx, cfg, hub, state, metrics, frameRecorder)
+	go listenPressureSubscribers(ctx, cfg.InputAddr, pressureStreams)
 	go syncLoop(ctx, conn, broadcastAddr, metrics)
 	go presentationLoop(ctx, cfg, conn, broadcastAddr, hub, state, frames, frameRecorder, metrics)
 	return listenFrameStream(ctx, cfg.FrameAddr, func(record *recordingpb.FrameRecord) {
@@ -312,7 +330,7 @@ func setBroadcast(conn *net.UDPConn) error {
 	return setErr
 }
 
-func readUDP(ctx context.Context, conn *net.UDPConn, state *controllerState, hub *websocketHub) {
+func readUDP(ctx context.Context, conn *net.UDPConn, state *controllerState, hub *websocketHub, pressureStreams *pressureStreamHub) {
 	buffer := make([]byte, 64*1024)
 	for {
 		select {
@@ -335,10 +353,43 @@ func readUDP(ctx context.Context, conn *net.UDPConn, state *controllerState, hub
 		case 0x88:
 			for _, event := range state.applySensorPacket(packet) {
 				hub.broadcastPressure(event)
+				pressureStreams.broadcast(event)
 			}
 		default:
 			log.Printf("unknown UDP packet 0x%02x from %s (%d bytes)", packet[0], addr, n)
 		}
+	}
+}
+
+func listenPressureSubscribers(ctx context.Context, addr string, hub *pressureStreamHub) {
+	if addr == "" || hub == nil {
+		return
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Printf("pressure event stream disabled: %v", err)
+		return
+	}
+	defer listener.Close()
+	log.Printf("pressure event stream: %s", addr)
+
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("pressure event accept: %v", err)
+			continue
+		}
+		client := &pressureStreamClient{conn: conn, jobs: make(chan *inputpb.PressureEvent, 256)}
+		hub.add(client)
+		go hub.writeClient(client)
 	}
 }
 
@@ -759,6 +810,7 @@ func (c config) configMessage() configMessage {
 		GridWidth:       floor.GridWidth,
 		GridHeight:      floor.GridHeight,
 		FrameAddr:       c.FrameAddr,
+		InputAddr:       c.InputAddr,
 		RecvPort:        c.RecvPort,
 		BroadcastAddr:   fmt.Sprintf("%s:%d", c.BroadcastIP, c.BroadcastPort),
 		ControllerID:    c.ControllerID,
@@ -860,6 +912,9 @@ func (h *websocketHub) readClient(conn *websocket.Conn, state *controllerState) 
 		}
 		if state.applyPress(event) {
 			h.broadcastPressure(event)
+			if h.pressureStreams != nil {
+				h.pressureStreams.broadcast(event)
+			}
 		}
 	}
 }
@@ -898,6 +953,73 @@ func (h *websocketHub) broadcastBinary(data []byte) {
 			_ = client.Close()
 			delete(h.clients, client)
 		}
+	}
+}
+
+func (h *pressureStreamHub) add(client *pressureStreamClient) {
+	if h == nil || client == nil {
+		return
+	}
+	h.mu.Lock()
+	h.clients[client] = true
+	h.mu.Unlock()
+	log.Printf("pressure subscriber connected")
+}
+
+func (h *pressureStreamHub) remove(client *pressureStreamClient) {
+	if h == nil || client == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.clients[client] {
+		delete(h.clients, client)
+		close(client.jobs)
+	}
+	h.mu.Unlock()
+	_ = client.conn.Close()
+}
+
+func (h *pressureStreamHub) writeClient(client *pressureStreamClient) {
+	defer h.remove(client)
+	writer := bufio.NewWriterSize(client.conn, 64*1024)
+	for event := range client.jobs {
+		if err := pbstream.Write(writer, event); err != nil {
+			return
+		}
+		if err := writer.Flush(); err != nil {
+			return
+		}
+	}
+}
+
+func (h *pressureStreamHub) broadcast(event pressEvent) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.seq++
+	record := pressureProtoFromEvent(h.seq, time.Now(), event)
+	for client := range h.clients {
+		select {
+		case client.jobs <- proto.Clone(record).(*inputpb.PressureEvent):
+		default:
+			log.Printf("pressure subscriber too slow; dropping event")
+		}
+	}
+}
+
+func pressureProtoFromEvent(sequence uint64, now time.Time, event pressEvent) *inputpb.PressureEvent {
+	return &inputpb.PressureEvent{
+		Sequence:   sequence,
+		UnixNanos:  now.UnixNano(),
+		X:          uint32(event.X),
+		Y:          uint32(event.Y),
+		Pressed:    event.Pressed,
+		Source:     event.Source,
+		Controller: uint32(event.Controller),
+		Channel:    uint32(event.Channel),
+		Position:   uint32(event.Position),
 	}
 }
 
@@ -982,5 +1104,5 @@ func (s *controllerState) snapshotPressed() [floor.GridHeight][floor.GridWidth]b
 }
 
 func (c config) String() string {
-	return fmt.Sprintf("controller-id=%s http=%s frames=%s refresh=%dfps udp=:%d broadcast=%s:%d record-compression=%s post-compression=%s record-segment-bytes=%d record-segment-duration=%s delete-raw-after=%s max-pending-raw=%d fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.RefreshFPS, c.RecvPort, c.BroadcastIP, c.BroadcastPort, recording.NormalizeCompression(c.RecordCompression), recording.NormalizePostCompression(c.RecordPostCompression), c.RecordSegmentBytes, c.RecordSegmentDuration, c.RecordDeleteRawAfter, c.RecordMaxPendingRawBytes, c.EngineFadeDelay, c.EngineFadeDuration)
+	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s refresh=%dfps udp=:%d broadcast=%s:%d record-compression=%s post-compression=%s record-segment-bytes=%d record-segment-duration=%s delete-raw-after=%s max-pending-raw=%d fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.RefreshFPS, c.RecvPort, c.BroadcastIP, c.BroadcastPort, recording.NormalizeCompression(c.RecordCompression), recording.NormalizePostCompression(c.RecordPostCompression), c.RecordSegmentBytes, c.RecordSegmentDuration, c.RecordDeleteRawAfter, c.RecordMaxPendingRawBytes, c.EngineFadeDelay, c.EngineFadeDuration)
 }

@@ -117,11 +117,34 @@ func TestConfigMessageUsesControllerOwnedSettings(t *testing.T) {
 	if message.BroadcastAddr != "127.0.0.1:4626" {
 		t.Fatalf("broadcast address = %q, want 127.0.0.1:4626", message.BroadcastAddr)
 	}
+	if message.InputAddr != "" {
+		t.Fatalf("input address = %q, want empty default from test config", message.InputAddr)
+	}
 	if !message.Recording {
 		t.Fatal("recording should be enabled when RecordFrames is set")
 	}
 	if message.Compression != "gzip" {
 		t.Fatalf("compression = %q, want gzip", message.Compression)
+	}
+}
+
+func TestPressureProtoFromEventIncludesHardwareAndLogicalCoordinates(t *testing.T) {
+	now := time.Unix(0, 123)
+	record := pressureProtoFromEvent(9, now, pressEvent{
+		Source:     "udp",
+		Controller: 1,
+		Channel:    2,
+		Position:   3,
+		X:          4,
+		Y:          5,
+		Pressed:    true,
+	})
+
+	if record.Sequence != 9 || record.UnixNanos != 123 || record.X != 4 || record.Y != 5 || !record.Pressed {
+		t.Fatalf("unexpected pressure record: %+v", record)
+	}
+	if record.Source != "udp" || record.Controller != 1 || record.Channel != 2 || record.Position != 3 {
+		t.Fatalf("unexpected pressure source metadata: %+v", record)
 	}
 }
 
