@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,6 +174,57 @@ func TestFrameRecorderRotatesSegmentsByCompressedBytes(t *testing.T) {
 	}
 	if stats := recorder.Stats(); stats.SegmentIndex != 3 || stats.WrittenFrames != 3 {
 		t.Fatalf("stats after rotation = %+v, want segment 3 and 3 frames", stats)
+	}
+}
+
+func TestFrameRecorderRotatesSegmentsBySessionID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "frames.pbstream")
+	recorder, err := NewFrameRecorderWithOptions(path, Options{
+		MaxSegmentBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	for sequence, sessionID := range []string{"session-a", "session-a", "session-b"} {
+		if err := recorder.RecordFrameWithLineage(
+			uint64(sequence+1),
+			now.Add(time.Duration(sequence)*time.Millisecond).UnixNano(),
+			1,
+			1,
+			[]floor.Tile{{X: 0, Y: 0}},
+			FrameLineage{SessionID: sessionID},
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := recorder.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var sessionIDs []string
+	paths := []string{
+		path,
+		filepath.Join(filepath.Dir(path), "frames-000002.pbstream"),
+	}
+	for _, segmentPath := range paths {
+		count, err := ReadRecoverableFrameRecords(segmentPath, "none", func(record *recordingpb.FrameRecord) error {
+			sessionIDs = append(sessionIDs, record.SessionId)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count == 0 {
+			t.Fatalf("segment %s is empty", segmentPath)
+		}
+	}
+	if got := strings.Join(sessionIDs, ","); got != "session-a,session-a,session-b" {
+		t.Fatalf("session ids = %s, want session-a,session-a,session-b", got)
+	}
+	if stats := recorder.Stats(); stats.SegmentIndex != 2 || stats.WrittenFrames != 3 {
+		t.Fatalf("stats after session rotation = %+v, want segment 2 and 3 frames", stats)
 	}
 }
 

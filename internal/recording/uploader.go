@@ -45,6 +45,7 @@ type UploadStats struct {
 }
 
 type segmentMetadata struct {
+	SessionID     string
 	FrameCount    uint64
 	FirstSequence uint64
 	LastSequence  uint64
@@ -171,6 +172,7 @@ func (u *SegmentUploader) run() {
 			u.failedSegments++
 			u.lastError = err.Error()
 			u.mu.Unlock()
+			u.requeueAfterDelay(job)
 			continue
 		}
 		u.mu.Lock()
@@ -178,6 +180,20 @@ func (u *SegmentUploader) run() {
 		u.lastError = ""
 		u.mu.Unlock()
 	}
+}
+
+func (u *SegmentUploader) requeueAfterDelay(job uploadJob) {
+	if u == nil {
+		return
+	}
+	delay := u.retryDelay(u.options.MaxAttempts + 1)
+	go func() {
+		time.Sleep(delay)
+		if _, err := os.Stat(job.Path); err != nil {
+			return
+		}
+		u.Enqueue(job)
+	}()
 }
 
 func (u *SegmentUploader) uploadWithRetry(job uploadJob) error {
@@ -257,8 +273,12 @@ type uploadInitResponse struct {
 }
 
 func (u *SegmentUploader) initUpload(job uploadJob, byteSize int64) (uploadInitResponse, error) {
+	sessionID := strings.TrimSpace(job.Metadata.SessionID)
+	if sessionID == "" {
+		sessionID = u.options.SessionID
+	}
 	payload := uploadInitRequest{
-		SessionID:     u.options.SessionID,
+		SessionID:     sessionID,
 		ControllerID:  u.options.ControllerID,
 		FileName:      filepath.Base(job.Path),
 		ContentType:   job.ContentType,
@@ -329,12 +349,17 @@ func (u *SegmentUploader) putObject(uploadURL, path, contentType string) error {
 		return err
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodPut, uploadURL, file)
 	if err != nil {
 		return err
 	}
+	request.ContentLength = info.Size()
 	if contentType != "" {
-		request.Header.Set("content-type", contentType)
+		request.Header.Set("Content-Type", contentType)
 	}
 	response, err := u.client.Do(request)
 	if err != nil {

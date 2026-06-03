@@ -477,7 +477,7 @@ func (r *FrameRecorder) writeFrame(job frameJob) error {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	if err := r.rotateIfNeeded(int64(len(data)), now); err != nil {
+	if err := r.rotateIfNeeded(int64(len(data)), now, job.sessionID); err != nil {
 		return err
 	}
 	if err := r.checkRawBudget(int64(len(data))); err != nil {
@@ -502,6 +502,7 @@ func (r *FrameRecorder) recordSegmentFrameLocked(job frameJob) {
 		timestamp = time.Now()
 	}
 	if r.segmentMetadata.FrameCount == 0 {
+		r.segmentMetadata.SessionID = strings.TrimSpace(job.sessionID)
 		r.segmentMetadata.FirstSequence = job.sequence
 		r.segmentMetadata.StartedAt = timestamp
 	}
@@ -550,11 +551,13 @@ func (r *FrameRecorder) checkRawBudget(nextFrameBytes int64) error {
 	return fmt.Errorf("pending raw recording bytes exceeded limit: pending=%d active=%d next=%d max=%d", r.pendingRawBytes, r.segmentBytes, nextFrameBytes, r.maxPendingRaw)
 }
 
-func (r *FrameRecorder) rotateIfNeeded(nextFrameBytes int64, now time.Time) error {
+func (r *FrameRecorder) rotateIfNeeded(nextFrameBytes int64, now time.Time, nextSessionID string) error {
+	nextSessionID = strings.TrimSpace(nextSessionID)
 	r.stateMu.Lock()
 	bySize := r.maxSegmentSize > 0 && r.segmentBytes > 0 && r.segmentBytes+nextFrameBytes > r.maxSegmentSize
 	byAge := r.maxSegmentAge > 0 && r.segmentBytes > 0 && !now.Before(r.segmentStartedAt.Add(r.maxSegmentAge))
-	shouldRotate := bySize || byAge
+	bySession := r.segmentBytes > 0 && strings.TrimSpace(r.segmentMetadata.SessionID) != nextSessionID
+	shouldRotate := bySize || byAge || bySession
 	r.stateMu.Unlock()
 	if !shouldRotate {
 		return nil
