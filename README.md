@@ -54,6 +54,7 @@ The defaults are:
 - frame recording rotation: `10m` or `256 MiB`, whichever comes first
 - raw recording cleanup: `1h` after verified `.zst` exists
 - pending raw recording cap: `4 GiB`
+- object-storage upload: disabled unless `-record-upload-platform-url` is set
 - game-engine disconnect fade: hold `2s`, then fade to black over `3s`
 
 Frame recording writes one length-prefixed protobuf `FrameRecord` for every
@@ -122,6 +123,29 @@ the whole machine running out of storage:
 
 ```sh
 go run ./floor-controller/cmd/floor-controller -record-max-pending-raw-bytes 4294967296
+```
+
+Closed recording segments can also upload directly to RustFS through the
+platform. The controller asks the platform for a short-lived presigned upload
+URL, uploads the finalized segment to RustFS, then reports the byte size,
+SHA-256, frame count, sequence range, and real timestamps back to the platform:
+
+```sh
+MOTION_LEVELS_PLATFORM_TOKEN=... \
+go run ./floor-controller/cmd/floor-controller \
+  -record-upload-platform-url https://platform.motionlevels.obis.dev
+```
+
+Upload runs on a bounded background queue after compression, so failed or slow
+network writes do not block floor refresh. Attach uploaded segments to a known
+game session when the game engine provides one:
+
+```sh
+go run ./floor-controller/cmd/floor-controller \
+  -record-upload-platform-url https://platform.motionlevels.obis.dev \
+  -record-upload-session-id session-20260603T100000Z \
+  -record-upload-queue-size 256 \
+  -record-upload-timeout 5m
 ```
 
 Tune the hardware, preview, and recording cadence with:

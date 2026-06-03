@@ -46,9 +46,11 @@ type FrameRecorder struct {
 	maxSegmentAge    time.Duration
 	maxPendingRaw    int64
 	deleteRawAfter   time.Duration
+	uploader         *SegmentUploader
 	segmentIndex     int
 	segmentBytes     int64
 	segmentStartedAt time.Time
+	segmentMetadata  segmentMetadata
 
 	jobs            chan frameJob
 	done            chan struct{}
@@ -76,31 +78,33 @@ type frameJob struct {
 }
 
 type segmentJob struct {
-	path string
+	path     string
+	metadata segmentMetadata
 }
 
 type Stats struct {
-	ControllerID          string `json:"controllerId,omitempty"`
-	Path                  string `json:"path"`
-	ActivePath            string `json:"activePath,omitempty"`
-	Compression           string `json:"compression"`
-	PostCompression       string `json:"postCompression"`
-	SegmentIndex          int    `json:"segmentIndex"`
-	SegmentBytes          int64  `json:"segmentBytes"`
-	MaxSegmentBytes       int64  `json:"maxSegmentBytes"`
-	MaxSegmentSeconds     int64  `json:"maxSegmentSeconds"`
-	PendingRawBytes       int64  `json:"pendingRawBytes"`
-	MaxPendingRawBytes    int64  `json:"maxPendingRawBytes"`
-	DeleteRawAfterSeconds int64  `json:"deleteRawAfterSeconds"`
-	QueueDepth            int    `json:"queueDepth"`
-	QueueCapacity         int    `json:"queueCapacity"`
-	CompressionQueueDepth int    `json:"compressionQueueDepth"`
-	WrittenFrames         uint64 `json:"writtenFrames"`
-	DroppedFrames         uint64 `json:"droppedFrames"`
-	CompressedSegments    uint64 `json:"compressedSegments"`
-	DeletedRawSegments    uint64 `json:"deletedRawSegments"`
-	Error                 string `json:"error,omitempty"`
-	CompressionError      string `json:"compressionError,omitempty"`
+	ControllerID          string      `json:"controllerId,omitempty"`
+	Path                  string      `json:"path"`
+	ActivePath            string      `json:"activePath,omitempty"`
+	Compression           string      `json:"compression"`
+	PostCompression       string      `json:"postCompression"`
+	SegmentIndex          int         `json:"segmentIndex"`
+	SegmentBytes          int64       `json:"segmentBytes"`
+	MaxSegmentBytes       int64       `json:"maxSegmentBytes"`
+	MaxSegmentSeconds     int64       `json:"maxSegmentSeconds"`
+	PendingRawBytes       int64       `json:"pendingRawBytes"`
+	MaxPendingRawBytes    int64       `json:"maxPendingRawBytes"`
+	DeleteRawAfterSeconds int64       `json:"deleteRawAfterSeconds"`
+	QueueDepth            int         `json:"queueDepth"`
+	QueueCapacity         int         `json:"queueCapacity"`
+	CompressionQueueDepth int         `json:"compressionQueueDepth"`
+	WrittenFrames         uint64      `json:"writtenFrames"`
+	DroppedFrames         uint64      `json:"droppedFrames"`
+	CompressedSegments    uint64      `json:"compressedSegments"`
+	DeletedRawSegments    uint64      `json:"deletedRawSegments"`
+	Upload                UploadStats `json:"upload"`
+	Error                 string      `json:"error,omitempty"`
+	CompressionError      string      `json:"compressionError,omitempty"`
 }
 
 type Options struct {
@@ -112,6 +116,7 @@ type Options struct {
 	MaxPendingRawBytes int64
 	DeleteRawAfter     time.Duration
 	ControllerID       string
+	Upload             UploadOptions
 }
 
 func NewFrameRecorder(path string) (*FrameRecorder, error) {
@@ -148,6 +153,7 @@ func normalizeOptions(options Options) Options {
 	if strings.TrimSpace(options.ZstdPath) == "" {
 		options.ZstdPath = "zstd"
 	}
+	options.Upload.ControllerID = options.ControllerID
 	return options
 }
 
@@ -169,6 +175,11 @@ func newFrameRecorderAt(path string, now time.Time, compression string, postComp
 		return nil, err
 	}
 
+	uploader, err := NewSegmentUploader(options.Upload)
+	if err != nil {
+		return nil, err
+	}
+
 	recorder := &FrameRecorder{
 		file:              file,
 		writer:            bufio.NewWriterSize(file, 1<<20),
@@ -184,6 +195,7 @@ func newFrameRecorderAt(path string, now time.Time, compression string, postComp
 		maxSegmentAge:     options.MaxSegmentDuration,
 		maxPendingRaw:     options.MaxPendingRawBytes,
 		deleteRawAfter:    options.DeleteRawAfter,
+		uploader:          uploader,
 		segmentIndex:      1,
 		segmentStartedAt:  now,
 		jobs:              make(chan frameJob, defaultFrameQueueSize),
@@ -366,6 +378,7 @@ func (r *FrameRecorder) Stats() Stats {
 		DroppedFrames:         r.dropped,
 		CompressedSegments:    r.compressedSegments,
 		DeletedRawSegments:    r.rawDeleted,
+		Upload:                r.uploader.Stats(),
 	}
 	if r.writeErr != nil {
 		stats.Error = r.writeErr.Error()
@@ -451,8 +464,23 @@ func (r *FrameRecorder) writeFrame(job frameJob) error {
 	}
 	r.stateMu.Lock()
 	r.segmentBytes += int64(len(data))
+	r.recordSegmentFrameLocked(job)
 	r.stateMu.Unlock()
 	return nil
+}
+
+func (r *FrameRecorder) recordSegmentFrameLocked(job frameJob) {
+	timestamp := time.Unix(0, job.unixNanos)
+	if job.unixNanos <= 0 {
+		timestamp = time.Now()
+	}
+	if r.segmentMetadata.FrameCount == 0 {
+		r.segmentMetadata.FirstSequence = job.sequence
+		r.segmentMetadata.StartedAt = timestamp
+	}
+	r.segmentMetadata.FrameCount++
+	r.segmentMetadata.LastSequence = job.sequence
+	r.segmentMetadata.EndedAt = timestamp
 }
 
 func encodeFrame(payload []byte, compression string) ([]byte, error) {
@@ -526,6 +554,7 @@ func (r *FrameRecorder) rotateIfNeeded(nextFrameBytes int64, now time.Time) erro
 	r.segmentIndex = nextIndex
 	r.segmentBytes = 0
 	r.segmentStartedAt = now
+	r.segmentMetadata = segmentMetadata{}
 	r.stateMu.Unlock()
 	return nil
 }
@@ -620,6 +649,7 @@ func (r *FrameRecorder) closeCurrentSegment() error {
 	activePath := r.activePath
 	finalPath := r.path
 	segmentBytes := r.segmentBytes
+	metadata := r.segmentMetadata
 	r.stateMu.Unlock()
 
 	var errs []error
@@ -638,13 +668,20 @@ func (r *FrameRecorder) closeCurrentSegment() error {
 		return err
 	}
 	r.addPendingRaw(segmentBytes)
-	r.enqueueCompression(finalPath)
+	if r.postCompression == "none" {
+		r.enqueueUpload(finalPath, metadata, r.codec, contentTypeForPath(finalPath))
+	} else {
+		r.enqueueCompression(finalPath, metadata)
+	}
 	return nil
 }
 
 func (r *FrameRecorder) runCompressor() {
 	defer close(r.compressionDone)
 	for job := range r.compressionJobs {
+		uploadPath := job.path
+		uploadCompression := r.codec
+		uploadContentType := contentTypeForPath(job.path)
 		if r.postCompression == "zstd" {
 			if err := compressWithZstd(r.zstdPath, job.path); err != nil {
 				r.clearCompressionTarget(job.path)
@@ -652,13 +689,17 @@ func (r *FrameRecorder) runCompressor() {
 				continue
 			}
 			r.markCompressed()
+			uploadPath = zstdPathFor(job.path)
+			uploadCompression = "zstd"
+			uploadContentType = "application/zstd"
 		}
+		r.enqueueUpload(uploadPath, job.metadata, uploadCompression, uploadContentType)
 		r.clearCompressionTarget(job.path)
 		r.cleanupRawSegments(time.Now())
 	}
 }
 
-func (r *FrameRecorder) enqueueCompression(path string) {
+func (r *FrameRecorder) enqueueCompression(path string, metadata segmentMetadata) {
 	if r == nil || r.postCompression == "none" || path == "" {
 		return
 	}
@@ -671,7 +712,7 @@ func (r *FrameRecorder) enqueueCompression(path string) {
 	r.stateMu.Unlock()
 
 	select {
-	case r.compressionJobs <- segmentJob{path: path}:
+	case r.compressionJobs <- segmentJob{path: path, metadata: metadata}:
 	default:
 		r.stateMu.Lock()
 		delete(r.queuedCompression, path)
@@ -679,6 +720,18 @@ func (r *FrameRecorder) enqueueCompression(path string) {
 		r.compressionErr = fmt.Sprintf("compression queue full; will retry during maintenance scan: %s", path)
 		r.stateMu.Unlock()
 	}
+}
+
+func (r *FrameRecorder) enqueueUpload(path string, metadata segmentMetadata, compression string, contentType string) {
+	if r == nil || r.uploader == nil || path == "" {
+		return
+	}
+	r.uploader.Enqueue(uploadJob{
+		Path:        path,
+		Metadata:    metadata,
+		Compression: compression,
+		ContentType: contentType,
+	})
 }
 
 func (r *FrameRecorder) clearCompressionTarget(path string) {
@@ -698,7 +751,7 @@ func (r *FrameRecorder) queueExistingRawSegments() {
 		if zstdVerified(r.zstdPath, zstdPathFor(path)) {
 			return nil
 		}
-		r.enqueueCompression(path)
+		r.enqueueCompression(path, segmentMetadata{})
 		return nil
 	})
 }
@@ -804,6 +857,17 @@ func isClosedRecordingSegment(path string) bool {
 	return true
 }
 
+func contentTypeForPath(path string) string {
+	switch {
+	case strings.HasSuffix(path, ".zst"):
+		return "application/zstd"
+	case strings.HasSuffix(path, ".gz"):
+		return "application/gzip"
+	default:
+		return "application/octet-stream"
+	}
+}
+
 func (r *FrameRecorder) scanPendingRawBytes() int64 {
 	var total int64
 	_ = filepath.WalkDir(r.recordingDir, func(path string, entry os.DirEntry, err error) error {
@@ -891,6 +955,7 @@ func (r *FrameRecorder) Close() error {
 
 	<-r.done
 	<-r.compressionDone
+	r.uploader.Close()
 
 	r.stateMu.Lock()
 	defer r.stateMu.Unlock()

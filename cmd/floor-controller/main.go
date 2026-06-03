@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -51,6 +52,11 @@ type config struct {
 	RecordSegmentDuration    time.Duration
 	RecordDeleteRawAfter     time.Duration
 	RecordMaxPendingRawBytes int64
+	RecordUploadPlatformURL  string
+	RecordUploadToken        string
+	RecordUploadSessionID    string
+	RecordUploadQueueSize    int
+	RecordUploadTimeout      time.Duration
 	ZstdPath                 string
 	RefreshFPS               int
 	EngineFadeDelay          time.Duration
@@ -199,6 +205,11 @@ func parseConfig() config {
 	flag.DurationVar(&cfg.RecordSegmentDuration, "record-segment-duration", recording.DefaultMaxSegmentDuration, "maximum recording segment duration before rotating")
 	flag.DurationVar(&cfg.RecordDeleteRawAfter, "record-delete-raw-after", recording.DefaultDeleteRawAfter, "delete raw segment this long after verified compressed segment exists")
 	flag.Int64Var(&cfg.RecordMaxPendingRawBytes, "record-max-pending-raw-bytes", recording.DefaultMaxPendingRawBytes, "maximum active and closed raw recording bytes before recording stops")
+	flag.StringVar(&cfg.RecordUploadPlatformURL, "record-upload-platform-url", os.Getenv("MOTION_LEVELS_PLATFORM_URL"), "platform base URL for direct RustFS recording uploads; empty disables")
+	flag.StringVar(&cfg.RecordUploadToken, "record-upload-token", os.Getenv("MOTION_LEVELS_PLATFORM_TOKEN"), "platform bearer token for recording upload endpoints; can also use MOTION_LEVELS_PLATFORM_TOKEN")
+	flag.StringVar(&cfg.RecordUploadSessionID, "record-upload-session-id", "", "optional game session id to attach uploaded recording segments to")
+	flag.IntVar(&cfg.RecordUploadQueueSize, "record-upload-queue-size", 256, "maximum finalized recording segments queued for platform upload")
+	flag.DurationVar(&cfg.RecordUploadTimeout, "record-upload-timeout", 5*time.Minute, "HTTP timeout for each platform/RustFS recording upload operation")
 	flag.StringVar(&cfg.ZstdPath, "zstd-path", "zstd", "path to zstd executable for background recording compression")
 	flag.IntVar(&cfg.RefreshFPS, "refresh-fps", 30, "floor-controller output refresh rate for UDP, websocket, and recording")
 	flag.DurationVar(&cfg.EngineFadeDelay, "engine-fade-delay", 2*time.Second, "time to hold the last game frame after the game-engine disconnects before fading")
@@ -235,6 +246,12 @@ func (c config) validate() error {
 	}
 	if c.RecordMaxPendingRawBytes < 1 {
 		errs = append(errs, fmt.Errorf("record-max-pending-raw-bytes must be at least 1"))
+	}
+	if c.RecordUploadQueueSize < 1 {
+		errs = append(errs, fmt.Errorf("record-upload-queue-size must be at least 1"))
+	}
+	if c.RecordUploadTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("record-upload-timeout must be positive"))
 	}
 	if c.EngineFadeDelay < 0 {
 		errs = append(errs, fmt.Errorf("engine-fade-delay must be non-negative"))
@@ -279,6 +296,13 @@ func run(ctx context.Context, cfg config) error {
 		DeleteRawAfter:     cfg.RecordDeleteRawAfter,
 		MaxPendingRawBytes: cfg.RecordMaxPendingRawBytes,
 		ControllerID:       cfg.ControllerID,
+		Upload: recording.UploadOptions{
+			PlatformURL: cfg.RecordUploadPlatformURL,
+			APIToken:    cfg.RecordUploadToken,
+			SessionID:   cfg.RecordUploadSessionID,
+			QueueSize:   cfg.RecordUploadQueueSize,
+			HTTPTimeout: cfg.RecordUploadTimeout,
+		},
 	})
 	if err != nil {
 		return err
@@ -1104,5 +1128,9 @@ func (s *controllerState) snapshotPressed() [floor.GridHeight][floor.GridWidth]b
 }
 
 func (c config) String() string {
-	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s refresh=%dfps udp=:%d broadcast=%s:%d record-compression=%s post-compression=%s record-segment-bytes=%d record-segment-duration=%s delete-raw-after=%s max-pending-raw=%d fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.RefreshFPS, c.RecvPort, c.BroadcastIP, c.BroadcastPort, recording.NormalizeCompression(c.RecordCompression), recording.NormalizePostCompression(c.RecordPostCompression), c.RecordSegmentBytes, c.RecordSegmentDuration, c.RecordDeleteRawAfter, c.RecordMaxPendingRawBytes, c.EngineFadeDelay, c.EngineFadeDuration)
+	upload := "off"
+	if strings.TrimSpace(c.RecordUploadPlatformURL) != "" {
+		upload = c.RecordUploadPlatformURL
+	}
+	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s refresh=%dfps udp=:%d broadcast=%s:%d record-compression=%s post-compression=%s record-segment-bytes=%d record-segment-duration=%s delete-raw-after=%s max-pending-raw=%d record-upload=%s fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.RefreshFPS, c.RecvPort, c.BroadcastIP, c.BroadcastPort, recording.NormalizeCompression(c.RecordCompression), recording.NormalizePostCompression(c.RecordPostCompression), c.RecordSegmentBytes, c.RecordSegmentDuration, c.RecordDeleteRawAfter, c.RecordMaxPendingRawBytes, upload, c.EngineFadeDelay, c.EngineFadeDuration)
 }
