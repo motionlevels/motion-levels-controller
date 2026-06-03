@@ -70,11 +70,24 @@ type FrameRecorder struct {
 }
 
 type frameJob struct {
-	sequence  uint64
-	unixNanos int64
-	width     uint32
-	height    uint32
-	tiles     []floor.Tile
+	sequence                     uint64
+	unixNanos                    int64
+	width                        uint32
+	height                       uint32
+	sessionID                    string
+	gameFrameSequence            uint64
+	gameUnixNanos                int64
+	controllerReceivedUnixNanos  int64
+	controllerPresentedUnixNanos int64
+	tiles                        []floor.Tile
+}
+
+type FrameLineage struct {
+	SessionID                    string
+	GameFrameSequence            uint64
+	GameUnixNanos                int64
+	ControllerReceivedUnixNanos  int64
+	ControllerPresentedUnixNanos int64
 }
 
 type segmentJob struct {
@@ -309,17 +322,26 @@ func openSegment(path string) (*os.File, string, string, error) {
 }
 
 func (r *FrameRecorder) RecordFrame(sequence uint64, unixNanos int64, width, height uint32, tiles []floor.Tile) error {
+	return r.RecordFrameWithLineage(sequence, unixNanos, width, height, tiles, FrameLineage{})
+}
+
+func (r *FrameRecorder) RecordFrameWithLineage(sequence uint64, unixNanos int64, width, height uint32, tiles []floor.Tile, lineage FrameLineage) error {
 	if r == nil {
 		return nil
 	}
 
 	copiedTiles := append([]floor.Tile(nil), tiles...)
 	job := frameJob{
-		sequence:  sequence,
-		unixNanos: unixNanos,
-		width:     width,
-		height:    height,
-		tiles:     copiedTiles,
+		sequence:                     sequence,
+		unixNanos:                    unixNanos,
+		width:                        width,
+		height:                       height,
+		sessionID:                    strings.TrimSpace(lineage.SessionID),
+		gameFrameSequence:            lineage.GameFrameSequence,
+		gameUnixNanos:                lineage.GameUnixNanos,
+		controllerReceivedUnixNanos:  lineage.ControllerReceivedUnixNanos,
+		controllerPresentedUnixNanos: lineage.ControllerPresentedUnixNanos,
+		tiles:                        copiedTiles,
 	}
 
 	r.stateMu.Lock()
@@ -420,11 +442,16 @@ func (r *FrameRecorder) run() {
 
 func (r *FrameRecorder) writeFrame(job frameJob) error {
 	record := &recordingpb.FrameRecord{
-		Sequence:  job.sequence,
-		UnixNanos: job.unixNanos,
-		Width:     job.width,
-		Height:    job.height,
-		Tiles:     make([]*recordingpb.TileState, 0, len(job.tiles)),
+		Sequence:                     job.sequence,
+		UnixNanos:                    job.unixNanos,
+		Width:                        job.width,
+		Height:                       job.height,
+		SessionId:                    job.sessionID,
+		GameFrameSequence:            job.gameFrameSequence,
+		GameUnixNanos:                job.gameUnixNanos,
+		ControllerReceivedUnixNanos:  job.controllerReceivedUnixNanos,
+		ControllerPresentedUnixNanos: job.controllerPresentedUnixNanos,
+		Tiles:                        make([]*recordingpb.TileState, 0, len(job.tiles)),
 	}
 	for _, tile := range job.tiles {
 		record.Tiles = append(record.Tiles, &recordingpb.TileState{

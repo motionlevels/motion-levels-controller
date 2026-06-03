@@ -353,6 +353,11 @@
           parts.push(`q${status.recording.queueDepth}`);
           parts.push(`d${status.recording.droppedFrames}`);
         }
+        if (status?.sync?.status && status.sync.status !== "unknown") {
+          const offset = Math.round(status.sync.engineClockOffsetMs || 0);
+          const sign = offset > 0 ? "+" : "";
+          parts.push(`sync ${status.sync.status} ${sign}${offset}ms`);
+        }
         if (status && !status.gameEngineOnline && status.engineFadeAmount > 0) {
           parts.push(`fade ${Math.round(status.engineFadeAmount * 100)}%`);
         }

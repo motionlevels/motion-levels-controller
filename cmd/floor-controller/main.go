@@ -91,6 +91,11 @@ type controllerMetrics struct {
 	lastGameFrameSequence  atomic.Uint64
 	lastGameFrameUnixNanos atomic.Int64
 	lastGameFrameReceived  atomic.Int64
+	lastGameSessionID      atomic.Value
+	syncSamples            atomic.Uint64
+	syncOffsetNanos        atomic.Int64
+	syncJitterNanos        atomic.Int64
+	presentLatencyNanos    atomic.Int64
 	gameEngineConnections  atomic.Int64
 	lastGameDisconnected   atomic.Int64
 }
@@ -163,7 +168,18 @@ type statusMessage struct {
 	GameEngineOnline  bool            `json:"gameEngineOnline"`
 	EngineFadeAmount  float64         `json:"engineFadeAmount"`
 	ControllerID      string          `json:"controllerId"`
+	Sync              syncStatus      `json:"sync"`
 	Recording         recording.Stats `json:"recording"`
+}
+
+type syncStatus struct {
+	Status                string  `json:"status"`
+	SessionID             string  `json:"sessionId,omitempty"`
+	Samples               uint64  `json:"samples"`
+	EngineClockOffsetMS   float64 `json:"engineClockOffsetMs"`
+	PresentLatencyMS      float64 `json:"presentLatencyMs"`
+	JitterMS              float64 `json:"jitterMs"`
+	LastGameFrameSequence uint64  `json:"lastGameFrameSequence"`
 }
 
 type pressureMessage struct {
@@ -321,8 +337,8 @@ func run(ctx context.Context, cfg config) error {
 	go listenPressureSubscribers(ctx, cfg.InputAddr, pressureStreams)
 	go syncLoop(ctx, conn, broadcastAddr, metrics)
 	go presentationLoop(ctx, cfg, conn, broadcastAddr, hub, state, frames, frameRecorder, metrics)
-	return listenFrameStream(ctx, cfg.FrameAddr, func(record *recordingpb.FrameRecord) {
-		metrics.markGameFrame(record)
+	return listenFrameStream(ctx, cfg.FrameAddr, func(record *recordingpb.FrameRecord, receivedAt time.Time) {
+		metrics.markGameFrame(record, receivedAt)
 		frames.update(record)
 	}, metrics.markGameEngineConnected, metrics.markGameEngineDisconnected)
 }
@@ -473,7 +489,7 @@ func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *contro
 	}
 }
 
-func listenFrameStream(ctx context.Context, addr string, onFrame func(*recordingpb.FrameRecord), onConnect, onDisconnect func()) error {
+func listenFrameStream(ctx context.Context, addr string, onFrame func(*recordingpb.FrameRecord, time.Time), onConnect, onDisconnect func()) error {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -509,7 +525,7 @@ func listenFrameStream(ctx context.Context, addr string, onFrame func(*recording
 	}
 }
 
-func handleFrameConnection(conn net.Conn, onFrame func(*recordingpb.FrameRecord), onConnect, onDisconnect func()) {
+func handleFrameConnection(conn net.Conn, onFrame func(*recordingpb.FrameRecord, time.Time), onConnect, onDisconnect func()) {
 	log.Printf("game-engine connected: %s", conn.RemoteAddr())
 	onConnect()
 	defer func() {
@@ -526,7 +542,17 @@ func handleFrameConnection(conn net.Conn, onFrame func(*recordingpb.FrameRecord)
 			}
 			return
 		}
-		onFrame(&frame)
+		receivedAt := time.Now()
+		if frame.ControllerReceivedUnixNanos == 0 {
+			frame.ControllerReceivedUnixNanos = receivedAt.UnixNano()
+		}
+		if frame.GameFrameSequence == 0 {
+			frame.GameFrameSequence = frame.Sequence
+		}
+		if frame.GameUnixNanos == 0 {
+			frame.GameUnixNanos = frame.UnixNanos
+		}
+		onFrame(&frame, receivedAt)
 	}
 }
 
@@ -566,11 +592,18 @@ func presentationLoop(ctx context.Context, cfg config, conn *net.UDPConn, addr *
 			if fade := metrics.engineFadeAmount(now, cfg.EngineFadeDelay, cfg.EngineFadeDuration); fade > 0 {
 				tiles = fadeTiles(tiles, 1-fade)
 			}
-			if err := recorder.RecordFrame(sequence, now.UnixNano(), frame.Width, frame.Height, tiles); err != nil {
+			lineage := recording.FrameLineage{
+				SessionID:                    frame.SessionId,
+				GameFrameSequence:            frame.GameFrameSequence,
+				GameUnixNanos:                frame.GameUnixNanos,
+				ControllerReceivedUnixNanos:  frame.ControllerReceivedUnixNanos,
+				ControllerPresentedUnixNanos: now.UnixNano(),
+			}
+			if err := recorder.RecordFrameWithLineage(sequence, now.UnixNano(), frame.Width, frame.Height, tiles, lineage); err != nil {
 				log.Printf("record frame: %v", err)
 			}
 			sendFrame(conn, addr, tiles, metrics)
-			metrics.markPresented(sequence, now)
+			metrics.markPresented(sequence, now, frame)
 			hub.broadcastBinary(buildViewerFrame(sequence, frame.Width, frame.Height, tiles))
 		}
 	}
@@ -625,23 +658,94 @@ func snapshotStatus(metrics *controllerMetrics, cfg config, hub *websocketHub, r
 		GameEngineOnline:  metrics.gameEngineOnline(),
 		EngineFadeAmount:  metrics.engineFadeAmount(now, cfg.EngineFadeDelay, cfg.EngineFadeDuration),
 		ControllerID:      cfg.ControllerID,
+		Sync:              metrics.syncStatus(),
 		Recording:         recorder.Stats(),
 	}
 }
 
-func (m *controllerMetrics) markPresented(sequence uint64, now time.Time) {
+func (m *controllerMetrics) markPresented(sequence uint64, now time.Time, frame *recordingpb.FrameRecord) {
 	m.presentedFrames.Store(sequence)
 	m.presentedFramesWindow.Add(1)
 	m.lastPresentedUnixNanos.Store(now.UnixNano())
+	if frame == nil {
+		return
+	}
+	gameUnixNanos := frame.GameUnixNanos
+	if gameUnixNanos == 0 {
+		gameUnixNanos = frame.UnixNanos
+	}
+	if gameUnixNanos > 0 {
+		m.presentLatencyNanos.Store(now.UnixNano() - gameUnixNanos)
+	}
 }
 
-func (m *controllerMetrics) markGameFrame(frame *recordingpb.FrameRecord) {
+func (m *controllerMetrics) markGameFrame(frame *recordingpb.FrameRecord, receivedAt time.Time) {
 	if frame == nil {
 		return
 	}
 	m.lastGameFrameSequence.Store(frame.Sequence)
 	m.lastGameFrameUnixNanos.Store(frame.UnixNanos)
-	m.lastGameFrameReceived.Store(time.Now().UnixNano())
+	receivedUnixNanos := receivedAt.UnixNano()
+	if frame.ControllerReceivedUnixNanos > 0 {
+		receivedUnixNanos = frame.ControllerReceivedUnixNanos
+	}
+	m.lastGameFrameReceived.Store(receivedUnixNanos)
+	if frame.SessionId != "" {
+		m.lastGameSessionID.Store(frame.SessionId)
+	}
+	gameUnixNanos := frame.GameUnixNanos
+	if gameUnixNanos == 0 {
+		gameUnixNanos = frame.UnixNanos
+	}
+	if gameUnixNanos <= 0 {
+		return
+	}
+	offset := receivedUnixNanos - gameUnixNanos
+	sample := m.syncSamples.Add(1)
+	previous := m.syncOffsetNanos.Swap(offset)
+	if sample > 1 {
+		m.syncJitterNanos.Store(absInt64(offset - previous))
+	}
+}
+
+func (m *controllerMetrics) syncStatus() syncStatus {
+	samples := m.syncSamples.Load()
+	offset := m.syncOffsetNanos.Load()
+	jitter := m.syncJitterNanos.Load()
+	latency := m.presentLatencyNanos.Load()
+	status := "unknown"
+	if samples > 0 {
+		status = "ok"
+		if absInt64(offset) > int64(100*time.Millisecond) || jitter > int64(100*time.Millisecond) {
+			status = "bad"
+		} else if absInt64(offset) > int64(50*time.Millisecond) || jitter > int64(25*time.Millisecond) {
+			status = "warn"
+		}
+		if !m.gameEngineOnline() {
+			status = "offline"
+		}
+	}
+	sessionID, _ := m.lastGameSessionID.Load().(string)
+	return syncStatus{
+		Status:                status,
+		SessionID:             sessionID,
+		Samples:               samples,
+		EngineClockOffsetMS:   nanosToMillis(offset),
+		PresentLatencyMS:      nanosToMillis(latency),
+		JitterMS:              nanosToMillis(jitter),
+		LastGameFrameSequence: m.lastGameFrameSequence.Load(),
+	}
+}
+
+func nanosToMillis(value int64) float64 {
+	return math.Round(float64(value)/float64(time.Millisecond)*10) / 10
+}
+
+func absInt64(value int64) int64 {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 func (m *controllerMetrics) markGameEngineConnected() {

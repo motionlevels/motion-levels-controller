@@ -51,6 +51,40 @@ func TestFrameRecorderWritesLengthPrefixedFrameRecord(t *testing.T) {
 	}
 }
 
+func TestFrameRecorderPersistsFrameLineage(t *testing.T) {
+	path := t.TempDir() + "/frames.pbstream"
+	recorder, err := NewFrameRecorder(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	presentedAt := time.Now().UnixNano()
+	lineage := FrameLineage{
+		SessionID:                    "session-1",
+		GameFrameSequence:            99,
+		GameUnixNanos:                presentedAt - int64(8*time.Millisecond),
+		ControllerReceivedUnixNanos:  presentedAt - int64(3*time.Millisecond),
+		ControllerPresentedUnixNanos: presentedAt,
+	}
+	if err := recorder.RecordFrameWithLineage(42, presentedAt, 16, 32, []floor.Tile{{X: 1, Y: 2, R: 3}}, lineage); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	record := readFrameRecord(t, path, false)
+	if record.Sequence != 42 || record.UnixNanos != presentedAt {
+		t.Fatalf("controller presentation fields = %d/%d, want 42/%d", record.Sequence, record.UnixNanos, presentedAt)
+	}
+	if record.SessionId != lineage.SessionID || record.GameFrameSequence != lineage.GameFrameSequence || record.GameUnixNanos != lineage.GameUnixNanos {
+		t.Fatalf("missing game lineage: %+v", record)
+	}
+	if record.ControllerReceivedUnixNanos != lineage.ControllerReceivedUnixNanos || record.ControllerPresentedUnixNanos != lineage.ControllerPresentedUnixNanos {
+		t.Fatalf("missing controller lineage: %+v", record)
+	}
+}
+
 func TestFrameRecorderWritesGzipCompressedFrameRecord(t *testing.T) {
 	path := t.TempDir() + "/frames.pbstream"
 	recorder, err := NewFrameRecorderWithOptions(path, Options{Compression: "gzip"})

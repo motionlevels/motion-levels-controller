@@ -184,6 +184,23 @@ Status includes presented frame count, measured FPS, latest game-frame age,
 game-engine connection/fade state, websocket client count, UDP send errors, and
 controller ID, recording compression, post-compression, current segment
 size/index, pending raw bytes, compression queue health, and queue/drop health.
+It also includes passive sync health derived from game-frame timestamps and the
+controller receive/presentation clock:
+
+```json
+{
+  "sync": {
+    "status": "ok",
+    "engineClockOffsetMs": 1.8,
+    "presentLatencyMs": 7.4,
+    "jitterMs": 2.1
+  }
+}
+```
+
+For same-PC controller and game-engine deployments this should remain small and
+stable. If the components move to separate machines later, this status gives us
+a non-intrusive warning before replay alignment becomes questionable.
 
 The process handles `SIGINT` and `SIGTERM` so the recorder can flush and close
 cleanly.

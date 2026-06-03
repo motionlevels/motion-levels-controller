@@ -224,7 +224,7 @@ func TestColorGridFromTilesSupportsConstantTimeLookup(t *testing.T) {
 
 func TestStatusSnapshotIncludesRecorderHealth(t *testing.T) {
 	metrics := newControllerMetrics()
-	metrics.markPresented(12, time.Now())
+	metrics.markPresented(12, time.Now(), nil)
 	hub := &websocketHub{}
 
 	status := snapshotStatus(metrics, config{}, hub, nil)
@@ -233,6 +233,34 @@ func TestStatusSnapshotIncludesRecorderHealth(t *testing.T) {
 	}
 	if status.PresentedFrames != 12 {
 		t.Fatalf("presented frames = %d, want 12", status.PresentedFrames)
+	}
+}
+
+func TestSyncStatusTracksClockOffsetAndLatency(t *testing.T) {
+	metrics := newControllerMetrics()
+	gameAt := time.Unix(0, 1_000_000_000)
+	receivedAt := gameAt.Add(2 * time.Millisecond)
+	presentedAt := gameAt.Add(8 * time.Millisecond)
+	frame := &recordingpb.FrameRecord{
+		Sequence:          44,
+		UnixNanos:         gameAt.UnixNano(),
+		SessionId:         "session-1",
+		GameFrameSequence: 44,
+		GameUnixNanos:     gameAt.UnixNano(),
+	}
+	metrics.markGameEngineConnected()
+	metrics.markGameFrame(frame, receivedAt)
+	metrics.markPresented(2, presentedAt, frame)
+
+	status := metrics.syncStatus()
+	if status.Status != "ok" {
+		t.Fatalf("sync status = %q, want ok", status.Status)
+	}
+	if status.SessionID != "session-1" || status.LastGameFrameSequence != 44 {
+		t.Fatalf("unexpected sync identity: %+v", status)
+	}
+	if status.EngineClockOffsetMS != 2 || status.PresentLatencyMS != 8 {
+		t.Fatalf("unexpected sync timing: %+v", status)
 	}
 }
 
