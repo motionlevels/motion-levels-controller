@@ -7,7 +7,7 @@ It does not produce game animations. It receives logical board frames from
 
 - keeps the latest frame in memory
 - refreshes the physical LED floor via UDP at a controller-owned cadence
-- serves the `/live` websocket preview
+- serves the browser websocket preview
 - merges tile pressure state into the preview and recordings
 - parses real floor sensor packets
 - accepts browser/touchscreen press simulation
@@ -22,13 +22,13 @@ connection immediately so streams cannot race each other.
 For local preview without touching the real floor:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -http :8081 -broadcast-ip 127.0.0.1
+go run ./floor-controller/cmd/floor-controller -http 127.0.0.1:4101 -broadcast-ip 127.0.0.1
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8081/live
+http://127.0.0.1:4101/
 ```
 
 The server listens on all interfaces when the HTTP address starts with `:`, so
@@ -42,8 +42,9 @@ go run ./floor-controller/cmd/floor-controller
 
 The defaults are:
 
-- HTTP preview: `:8080`
-- frame stream TCP listener: `:9090`
+- HTTP preview: `127.0.0.1:4101`
+- frame stream TCP listener: `127.0.0.1:4201`
+- pressure event stream: `127.0.0.1:4202`
 - UDP receive socket: `:7800`
 - LED broadcast: `255.255.255.255:4626`
 - controller ID file: `.motion-levels-controller-id`
@@ -177,7 +178,7 @@ instead of slowing LED output.
 The controller exposes live operational status as JSON:
 
 ```text
-http://127.0.0.1:8081/status
+http://127.0.0.1:4101/status
 ```
 
 Status includes presented frame count, measured FPS, latest game-frame age,
@@ -214,7 +215,7 @@ The browser viewer uses websocket text messages for control and input events:
 
 Rendered frames are websocket binary messages. Each binary frame starts with a
 fixed `MLF1` header, followed by packed RGB bytes and a pressure bitset. This
-keeps `/live` lightweight without adding protobuf tooling to the browser.
+keeps the preview lightweight without adding protobuf tooling to the browser.
 
 See `docs/protocol/live-viewer.md` and `docs/protocol/pressure-events.md` for
 the protocol details.

@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"embed"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -15,6 +17,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -57,6 +60,10 @@ type config struct {
 	RecordUploadSessionID    string
 	RecordUploadQueueSize    int
 	RecordUploadTimeout      time.Duration
+	LivePushPlatformURL      string
+	LivePushToken            string
+	LivePushFPS              int
+	LivePushTimeout          time.Duration
 	ZstdPath                 string
 	RefreshFPS               int
 	EngineFadeDelay          time.Duration
@@ -134,6 +141,26 @@ type pressEvent struct {
 	Pressed    bool
 }
 
+type liveFloorPushJob struct {
+	ControllerID       string `json:"controllerId"`
+	SessionID          string `json:"sessionId,omitempty"`
+	Sequence           uint64 `json:"sequence"`
+	Width              uint32 `json:"width"`
+	Height             uint32 `json:"height"`
+	PresentedUnixNanos int64  `json:"presentedUnixNanos"`
+	FrameBase64        string `json:"frameBase64"`
+}
+
+type liveFramePusher struct {
+	endpoint     string
+	token        string
+	interval     time.Duration
+	client       *http.Client
+	jobs         chan liveFloorPushJob
+	lastEnqueued time.Time
+	lastErrorLog time.Time
+}
+
 type inputMessage struct {
 	Type    string `json:"type"`
 	X       int    `json:"x"`
@@ -204,11 +231,43 @@ func main() {
 	}
 }
 
+func envInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	var parsed int
+	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envDuration(name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
 func parseConfig() config {
 	cfg := config{}
-	flag.StringVar(&cfg.HTTPAddr, "http", ":8080", "HTTP address for websocket preview")
-	flag.StringVar(&cfg.FrameAddr, "frames", ":9090", "TCP address for length-prefixed protobuf frame stream")
-	flag.StringVar(&cfg.InputAddr, "input-events", ":9091", "TCP address for pressure event subscribers; empty disables")
+	livePushPlatformURL := os.Getenv("MOTION_LEVELS_LIVE_PUSH_PLATFORM_URL")
+	if strings.TrimSpace(livePushPlatformURL) == "" {
+		livePushPlatformURL = os.Getenv("MOTION_LEVELS_PLATFORM_URL")
+	}
+	livePushToken := os.Getenv("MOTION_LEVELS_LIVE_PUSH_TOKEN")
+	if strings.TrimSpace(livePushToken) == "" {
+		livePushToken = os.Getenv("MOTION_LEVELS_PLATFORM_TOKEN")
+	}
+	flag.StringVar(&cfg.HTTPAddr, "http", "127.0.0.1:4101", "HTTP address for websocket preview")
+	flag.StringVar(&cfg.FrameAddr, "frames", "127.0.0.1:4201", "TCP address for length-prefixed protobuf frame stream")
+	flag.StringVar(&cfg.InputAddr, "input-events", "127.0.0.1:4202", "TCP address for pressure event subscribers; empty disables")
 	flag.IntVar(&cfg.RecvPort, "recv-port", 7800, "UDP port for tile handshake/sensor packets")
 	flag.StringVar(&cfg.BroadcastIP, "broadcast-ip", "255.255.255.255", "UDP broadcast IP for LED packets")
 	flag.IntVar(&cfg.BroadcastPort, "broadcast-port", 4626, "UDP broadcast port for LED packets")
@@ -226,6 +285,10 @@ func parseConfig() config {
 	flag.StringVar(&cfg.RecordUploadSessionID, "record-upload-session-id", "", "optional game session id to attach uploaded recording segments to")
 	flag.IntVar(&cfg.RecordUploadQueueSize, "record-upload-queue-size", 256, "maximum finalized recording segments queued for platform upload")
 	flag.DurationVar(&cfg.RecordUploadTimeout, "record-upload-timeout", 5*time.Minute, "HTTP timeout for each platform/RustFS recording upload operation")
+	flag.StringVar(&cfg.LivePushPlatformURL, "live-push-platform-url", livePushPlatformURL, "platform base URL for outbound live floor preview frames; empty disables")
+	flag.StringVar(&cfg.LivePushToken, "live-push-token", livePushToken, "platform bearer token for live floor preview ingest; can also use MOTION_LEVELS_LIVE_PUSH_TOKEN or MOTION_LEVELS_PLATFORM_TOKEN")
+	flag.IntVar(&cfg.LivePushFPS, "live-push-fps", envInt("MOTION_LEVELS_LIVE_PUSH_FPS", 5), "maximum outbound live floor preview push rate; 0 disables")
+	flag.DurationVar(&cfg.LivePushTimeout, "live-push-timeout", envDuration("MOTION_LEVELS_LIVE_PUSH_TIMEOUT", 2*time.Second), "HTTP timeout for live floor preview pushes")
 	flag.StringVar(&cfg.ZstdPath, "zstd-path", "zstd", "path to zstd executable for background recording compression")
 	flag.IntVar(&cfg.RefreshFPS, "refresh-fps", 30, "floor-controller output refresh rate for UDP, websocket, and recording")
 	flag.DurationVar(&cfg.EngineFadeDelay, "engine-fade-delay", 2*time.Second, "time to hold the last game frame after the game-engine disconnects before fading")
@@ -268,6 +331,18 @@ func (c config) validate() error {
 	}
 	if c.RecordUploadTimeout <= 0 {
 		errs = append(errs, fmt.Errorf("record-upload-timeout must be positive"))
+	}
+	if c.LivePushFPS < 0 {
+		errs = append(errs, fmt.Errorf("live-push-fps must be zero or greater"))
+	}
+	if c.LivePushTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("live-push-timeout must be positive"))
+	}
+	if strings.TrimSpace(c.LivePushPlatformURL) != "" {
+		parsed, err := url.Parse(c.LivePushPlatformURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			errs = append(errs, fmt.Errorf("live-push-platform-url must be an absolute URL"))
+		}
 	}
 	if c.EngineFadeDelay < 0 {
 		errs = append(errs, fmt.Errorf("engine-fade-delay must be non-negative"))
@@ -327,6 +402,11 @@ func run(ctx context.Context, cfg config) error {
 	if cfg.RecordFrames != "" {
 		log.Printf("frame recording: %s", frameRecorder.Path())
 	}
+	livePusher := newLiveFramePusher(cfg)
+	if livePusher != nil {
+		go livePusher.run(ctx)
+		log.Printf("live floor push: %s at up to %d fps", livePusher.endpoint, cfg.LivePushFPS)
+	}
 	log.Printf("controller id: %s", cfg.ControllerID)
 	log.Printf("config: %s recording=%s", cfg, frameRecorder.Path())
 
@@ -336,7 +416,7 @@ func run(ctx context.Context, cfg config) error {
 	go serveHTTP(ctx, cfg, hub, state, metrics, frameRecorder)
 	go listenPressureSubscribers(ctx, cfg.InputAddr, pressureStreams)
 	go syncLoop(ctx, conn, broadcastAddr, metrics)
-	go presentationLoop(ctx, cfg, conn, broadcastAddr, hub, state, frames, frameRecorder, metrics)
+	go presentationLoop(ctx, cfg, conn, broadcastAddr, hub, state, frames, frameRecorder, metrics, livePusher)
 	return listenFrameStream(ctx, cfg.FrameAddr, func(record *recordingpb.FrameRecord, receivedAt time.Time) {
 		metrics.markGameFrame(record, receivedAt)
 		frames.update(record)
@@ -452,11 +532,6 @@ func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *contro
 		}
 		hub.add(conn, state)
 	})
-	mux.HandleFunc("/live", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Write(index)
-	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
@@ -469,10 +544,12 @@ func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *contro
 			http.NotFound(w, r)
 			return
 		}
-		http.Redirect(w, r, "/live", http.StatusTemporaryRedirect)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Write(index)
 	})
 
-	for _, url := range previewURLs(cfg.HTTPAddr, "/live") {
+	for _, url := range previewURLs(cfg.HTTPAddr, "/") {
 		log.Printf("preview: %s", url)
 	}
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: mux}
@@ -572,7 +649,7 @@ func (g *gameEngineStreamGate) release() {
 	g.active = false
 }
 
-func presentationLoop(ctx context.Context, cfg config, conn *net.UDPConn, addr *net.UDPAddr, hub *websocketHub, state *controllerState, frames *latestFrameBuffer, recorder *recording.FrameRecorder, metrics *controllerMetrics) {
+func presentationLoop(ctx context.Context, cfg config, conn *net.UDPConn, addr *net.UDPAddr, hub *websocketHub, state *controllerState, frames *latestFrameBuffer, recorder *recording.FrameRecorder, metrics *controllerMetrics, livePusher *liveFramePusher) {
 	log.Printf("presentation refresh: %d fps", cfg.RefreshFPS)
 	ticker := time.NewTicker(time.Second / time.Duration(cfg.RefreshFPS))
 	defer ticker.Stop()
@@ -604,9 +681,108 @@ func presentationLoop(ctx context.Context, cfg config, conn *net.UDPConn, addr *
 			}
 			sendFrame(conn, addr, tiles, metrics)
 			metrics.markPresented(sequence, now, frame)
-			hub.broadcastBinary(buildViewerFrame(sequence, frame.Width, frame.Height, tiles))
+			viewerFrame := buildViewerFrame(sequence, frame.Width, frame.Height, tiles)
+			hub.broadcastBinary(viewerFrame)
+			if livePusher != nil && livePusher.shouldEnqueue(now) {
+				livePusher.enqueue(liveFloorPushJob{
+					ControllerID:       cfg.ControllerID,
+					SessionID:          frame.SessionId,
+					Sequence:           sequence,
+					Width:              frame.Width,
+					Height:             frame.Height,
+					PresentedUnixNanos: now.UnixNano(),
+					FrameBase64:        base64.StdEncoding.EncodeToString(viewerFrame),
+				})
+			}
 		}
 	}
+}
+
+func (p *liveFramePusher) shouldEnqueue(now time.Time) bool {
+	if p == nil || now.Sub(p.lastEnqueued) < p.interval {
+		return false
+	}
+	p.lastEnqueued = now
+	return true
+}
+
+func newLiveFramePusher(cfg config) *liveFramePusher {
+	platformURL := strings.TrimSpace(cfg.LivePushPlatformURL)
+	if platformURL == "" || cfg.LivePushFPS == 0 {
+		return nil
+	}
+	return &liveFramePusher{
+		endpoint: strings.TrimRight(platformURL, "/") + "/api/live-floor/ingest",
+		token:    strings.TrimSpace(cfg.LivePushToken),
+		interval: time.Second / time.Duration(cfg.LivePushFPS),
+		client:   &http.Client{Timeout: cfg.LivePushTimeout},
+		jobs:     make(chan liveFloorPushJob, 1),
+	}
+}
+
+func (p *liveFramePusher) enqueue(job liveFloorPushJob) {
+	if p == nil {
+		return
+	}
+
+	select {
+	case p.jobs <- job:
+		return
+	default:
+	}
+
+	select {
+	case <-p.jobs:
+	default:
+	}
+
+	select {
+	case p.jobs <- job:
+	default:
+	}
+}
+
+func (p *liveFramePusher) run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-p.jobs:
+			if err := p.post(ctx, job); err != nil {
+				now := time.Now()
+				if now.Sub(p.lastErrorLog) >= 10*time.Second {
+					log.Printf("live floor push: %v", err)
+					p.lastErrorLog = now
+				}
+			}
+		}
+	}
+}
+
+func (p *liveFramePusher) post(ctx context.Context, job liveFloorPushJob) error {
+	body, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if p.token != "" {
+		request.Header.Set("Authorization", "Bearer "+p.token)
+	}
+
+	response, err := p.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, response.Body)
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("platform returned %s", response.Status)
+	}
+	return nil
 }
 
 func newControllerMetrics() *controllerMetrics {
@@ -1236,5 +1412,9 @@ func (c config) String() string {
 	if strings.TrimSpace(c.RecordUploadPlatformURL) != "" {
 		upload = c.RecordUploadPlatformURL
 	}
-	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s refresh=%dfps udp=:%d broadcast=%s:%d record-compression=%s post-compression=%s record-segment-bytes=%d record-segment-duration=%s delete-raw-after=%s max-pending-raw=%d record-upload=%s fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.RefreshFPS, c.RecvPort, c.BroadcastIP, c.BroadcastPort, recording.NormalizeCompression(c.RecordCompression), recording.NormalizePostCompression(c.RecordPostCompression), c.RecordSegmentBytes, c.RecordSegmentDuration, c.RecordDeleteRawAfter, c.RecordMaxPendingRawBytes, upload, c.EngineFadeDelay, c.EngineFadeDuration)
+	livePush := "off"
+	if strings.TrimSpace(c.LivePushPlatformURL) != "" && c.LivePushFPS > 0 {
+		livePush = fmt.Sprintf("%s@%dfps", c.LivePushPlatformURL, c.LivePushFPS)
+	}
+	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s refresh=%dfps udp=:%d broadcast=%s:%d record-compression=%s post-compression=%s record-segment-bytes=%d record-segment-duration=%s delete-raw-after=%s max-pending-raw=%d record-upload=%s live-push=%s fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.RefreshFPS, c.RecvPort, c.BroadcastIP, c.BroadcastPort, recording.NormalizeCompression(c.RecordCompression), recording.NormalizePostCompression(c.RecordPostCompression), c.RecordSegmentBytes, c.RecordSegmentDuration, c.RecordDeleteRawAfter, c.RecordMaxPendingRawBytes, upload, livePush, c.EngineFadeDelay, c.EngineFadeDuration)
 }

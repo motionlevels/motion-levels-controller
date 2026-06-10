@@ -96,7 +96,7 @@ func TestGameEngineStreamGateAllowsOnlyOneActiveStream(t *testing.T) {
 
 func TestConfigMessageUsesControllerOwnedSettings(t *testing.T) {
 	message := config{
-		FrameAddr:         ":9090",
+		FrameAddr:         "127.0.0.1:4201",
 		RecvPort:          7800,
 		BroadcastIP:       "127.0.0.1",
 		BroadcastPort:     4626,
@@ -194,7 +194,7 @@ func TestBuildViewerFrameEncodesRGBAndPressureBitset(t *testing.T) {
 
 func TestConfigValidationRejectsInvalidHardwareConfig(t *testing.T) {
 	cfg := config{
-		FrameAddr:         ":9090",
+		FrameAddr:         "127.0.0.1:4201",
 		RecvPort:          0,
 		BroadcastIP:       "not-an-ip",
 		BroadcastPort:     4626,

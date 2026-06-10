@@ -233,7 +233,8 @@
 
       function connect() {
         const protocol = location.protocol === "https:" ? "wss" : "ws";
-        socket = new WebSocket(`${protocol}://${location.host}/ws`);
+        const basePath = location.pathname.replace(/\/$/, "");
+        socket = new WebSocket(`${protocol}://${location.host}${basePath}/ws`);
         socket.binaryType = "arraybuffer";
 
         socket.addEventListener("open", () => {
