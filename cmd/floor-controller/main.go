@@ -532,6 +532,21 @@ func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *contro
 		}
 		hub.add(conn, state)
 	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if _, err := w.Write([]byte(`{"status":"ok"}` + "\n")); err != nil {
+			log.Printf("health response: %v", err)
+		}
+	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
