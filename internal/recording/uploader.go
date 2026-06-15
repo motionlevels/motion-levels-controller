@@ -243,10 +243,17 @@ func (u *SegmentUploader) upload(job uploadJob) error {
 	if err := u.completeUpload(initResp.UploadID, info.Size(), checksum, job.Metadata); err != nil {
 		return err
 	}
+	removeUploadedSegment(job.Path)
 	u.mu.Lock()
 	u.lastObjectKey = initResp.ObjectKey
 	u.mu.Unlock()
 	return nil
+}
+
+func removeUploadedSegment(path string) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "recording upload cleanup failed: %v\n", err)
+	}
 }
 
 type uploadInitRequest struct {

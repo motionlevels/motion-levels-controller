@@ -100,6 +100,9 @@ func TestSegmentUploaderUploadsAndCompletes(t *testing.T) {
 	if completed.UploadID != "upload-1" || completed.SHA256 != expectedSHA || completed.ByteSize != int64(len(payload)) {
 		t.Fatalf("unexpected completion: %+v want sha %s size %d", completed, expectedSHA, len(payload))
 	}
+	if _, err := os.Stat(segmentPath); !os.IsNotExist(err) {
+		t.Fatalf("local segment still exists after upload: %v", err)
+	}
 	if stats := uploader.Stats(); stats.UploadedSegments != 1 || stats.FailedSegments != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
