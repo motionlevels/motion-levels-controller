@@ -75,6 +75,7 @@ type frameJob struct {
 	width                        uint32
 	height                       uint32
 	sessionID                    string
+	venueSessionID               string
 	gameFrameSequence            uint64
 	gameUnixNanos                int64
 	controllerReceivedUnixNanos  int64
@@ -84,6 +85,7 @@ type frameJob struct {
 
 type FrameLineage struct {
 	SessionID                    string
+	VenueSessionID               string
 	GameFrameSequence            uint64
 	GameUnixNanos                int64
 	ControllerReceivedUnixNanos  int64
@@ -337,6 +339,7 @@ func (r *FrameRecorder) RecordFrameWithLineage(sequence uint64, unixNanos int64,
 		width:                        width,
 		height:                       height,
 		sessionID:                    strings.TrimSpace(lineage.SessionID),
+		venueSessionID:               strings.TrimSpace(lineage.VenueSessionID),
 		gameFrameSequence:            lineage.GameFrameSequence,
 		gameUnixNanos:                lineage.GameUnixNanos,
 		controllerReceivedUnixNanos:  lineage.ControllerReceivedUnixNanos,
@@ -447,6 +450,7 @@ func (r *FrameRecorder) writeFrame(job frameJob) error {
 		Width:                        job.width,
 		Height:                       job.height,
 		SessionId:                    job.sessionID,
+		VenueSessionId:               job.venueSessionID,
 		GameFrameSequence:            job.gameFrameSequence,
 		GameUnixNanos:                job.gameUnixNanos,
 		ControllerReceivedUnixNanos:  job.controllerReceivedUnixNanos,
@@ -503,6 +507,7 @@ func (r *FrameRecorder) recordSegmentFrameLocked(job frameJob) {
 	}
 	if r.segmentMetadata.FrameCount == 0 {
 		r.segmentMetadata.SessionID = strings.TrimSpace(job.sessionID)
+		r.segmentMetadata.VenueSessionID = strings.TrimSpace(job.venueSessionID)
 		r.segmentMetadata.FirstSequence = job.sequence
 		r.segmentMetadata.StartedAt = timestamp
 	}

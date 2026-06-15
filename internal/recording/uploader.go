@@ -45,12 +45,13 @@ type UploadStats struct {
 }
 
 type segmentMetadata struct {
-	SessionID     string
-	FrameCount    uint64
-	FirstSequence uint64
-	LastSequence  uint64
-	StartedAt     time.Time
-	EndedAt       time.Time
+	SessionID      string
+	VenueSessionID string
+	FrameCount     uint64
+	FirstSequence  uint64
+	LastSequence   uint64
+	StartedAt      time.Time
+	EndedAt        time.Time
 }
 
 type uploadJob struct {
@@ -257,17 +258,18 @@ func removeUploadedSegment(path string) {
 }
 
 type uploadInitRequest struct {
-	SessionID     string `json:"sessionId,omitempty"`
-	ControllerID  string `json:"controllerId,omitempty"`
-	FileName      string `json:"fileName,omitempty"`
-	ContentType   string `json:"contentType,omitempty"`
-	Compression   string `json:"compression,omitempty"`
-	ByteSize      int64  `json:"byteSize,omitempty"`
-	FrameCount    uint64 `json:"frameCount,omitempty"`
-	FirstSequence uint64 `json:"firstSequence,omitempty"`
-	LastSequence  uint64 `json:"lastSequence,omitempty"`
-	StartedAt     string `json:"startedAt,omitempty"`
-	EndedAt       string `json:"endedAt,omitempty"`
+	SessionID      string `json:"sessionId,omitempty"`
+	VenueSessionID string `json:"venueSessionId,omitempty"`
+	ControllerID   string `json:"controllerId,omitempty"`
+	FileName       string `json:"fileName,omitempty"`
+	ContentType    string `json:"contentType,omitempty"`
+	Compression    string `json:"compression,omitempty"`
+	ByteSize       int64  `json:"byteSize,omitempty"`
+	FrameCount     uint64 `json:"frameCount,omitempty"`
+	FirstSequence  uint64 `json:"firstSequence,omitempty"`
+	LastSequence   uint64 `json:"lastSequence,omitempty"`
+	StartedAt      string `json:"startedAt,omitempty"`
+	EndedAt        string `json:"endedAt,omitempty"`
 }
 
 type uploadInitResponse struct {
@@ -285,17 +287,18 @@ func (u *SegmentUploader) initUpload(job uploadJob, byteSize int64) (uploadInitR
 		sessionID = u.options.SessionID
 	}
 	payload := uploadInitRequest{
-		SessionID:     sessionID,
-		ControllerID:  u.options.ControllerID,
-		FileName:      filepath.Base(job.Path),
-		ContentType:   job.ContentType,
-		Compression:   job.Compression,
-		ByteSize:      byteSize,
-		FrameCount:    job.Metadata.FrameCount,
-		FirstSequence: job.Metadata.FirstSequence,
-		LastSequence:  job.Metadata.LastSequence,
-		StartedAt:     formatOptionalTime(job.Metadata.StartedAt),
-		EndedAt:       formatOptionalTime(job.Metadata.EndedAt),
+		SessionID:      sessionID,
+		VenueSessionID: job.Metadata.VenueSessionID,
+		ControllerID:   u.options.ControllerID,
+		FileName:       filepath.Base(job.Path),
+		ContentType:    job.ContentType,
+		Compression:    job.Compression,
+		ByteSize:       byteSize,
+		FrameCount:     job.Metadata.FrameCount,
+		FirstSequence:  job.Metadata.FirstSequence,
+		LastSequence:   job.Metadata.LastSequence,
+		StartedAt:      formatOptionalTime(job.Metadata.StartedAt),
+		EndedAt:        formatOptionalTime(job.Metadata.EndedAt),
 	}
 	var response uploadInitResponse
 	if err := u.postJSON("/api/recording-uploads/init", payload, &response); err != nil {

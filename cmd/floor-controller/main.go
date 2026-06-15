@@ -686,6 +686,7 @@ func presentationLoop(ctx context.Context, cfg config, conn *net.UDPConn, addr *
 			}
 			lineage := recording.FrameLineage{
 				SessionID:                    frame.SessionId,
+				VenueSessionID:               frame.VenueSessionId,
 				GameFrameSequence:            frame.GameFrameSequence,
 				GameUnixNanos:                frame.GameUnixNanos,
 				ControllerReceivedUnixNanos:  frame.ControllerReceivedUnixNanos,
