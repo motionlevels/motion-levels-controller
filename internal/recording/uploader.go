@@ -255,6 +255,12 @@ func removeUploadedSegment(path string) {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "recording upload cleanup failed: %v\n", err)
 	}
+	if strings.HasSuffix(path, ".zst") {
+		rawPath := strings.TrimSuffix(path, ".zst")
+		if err := os.Remove(rawPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "recording raw cleanup failed: %v\n", err)
+		}
+	}
 }
 
 type uploadInitRequest struct {

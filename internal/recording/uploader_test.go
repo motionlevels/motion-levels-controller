@@ -16,7 +16,11 @@ import (
 func TestSegmentUploaderUploadsAndCompletes(t *testing.T) {
 	dir := t.TempDir()
 	segmentPath := filepath.Join(dir, "segment.frames.pbstream.zst")
+	rawSegmentPath := filepath.Join(dir, "segment.frames.pbstream")
 	payload := []byte("compressed segment")
+	if err := os.WriteFile(rawSegmentPath, []byte("raw segment"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(segmentPath, payload, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +106,9 @@ func TestSegmentUploaderUploadsAndCompletes(t *testing.T) {
 	}
 	if _, err := os.Stat(segmentPath); !os.IsNotExist(err) {
 		t.Fatalf("local segment still exists after upload: %v", err)
+	}
+	if _, err := os.Stat(rawSegmentPath); !os.IsNotExist(err) {
+		t.Fatalf("local raw segment still exists after compressed upload: %v", err)
 	}
 	if stats := uploader.Stats(); stats.UploadedSegments != 1 || stats.FailedSegments != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
