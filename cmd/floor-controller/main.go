@@ -188,6 +188,7 @@ type statusMessage struct {
 	UptimeSeconds     int64           `json:"uptimeSeconds"`
 	PresentedFrames   uint64          `json:"presentedFrames"`
 	ActualFPS         float64         `json:"actualFps"`
+	RefreshFPS        int             `json:"refreshFps"`
 	WebsocketClients  int             `json:"websocketClients"`
 	UDPErrorCount     uint64          `json:"udpErrorCount"`
 	GameFrameAgeMS    int64           `json:"gameFrameAgeMs"`
@@ -843,6 +844,7 @@ func snapshotStatus(metrics *controllerMetrics, cfg config, hub *websocketHub, r
 		UptimeSeconds:     int64(now.Sub(metrics.startedAt).Seconds()),
 		PresentedFrames:   metrics.presentedFrames.Load(),
 		ActualFPS:         math.Float64frombits(metrics.actualFPSBits.Load()),
+		RefreshFPS:        cfg.RefreshFPS,
 		WebsocketClients:  hub.clientCount(),
 		UDPErrorCount:     metrics.udpSendErrors.Load(),
 		GameFrameAgeMS:    gameFrameAgeMS,

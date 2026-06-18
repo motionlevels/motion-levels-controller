@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/lobis/motion-levels/floor-controller/internal/floor"
 	"github.com/lobis/motion-levels/packages/contracts/recordingpb"
 )
@@ -77,6 +78,15 @@ func TestLatestFrameBufferCopiesIncomingFrame(t *testing.T) {
 	}
 	if nextSnapshot.Tiles[0].G != 4 {
 		t.Fatalf("next snapshot tile green = %d, want 4", nextSnapshot.Tiles[0].G)
+	}
+}
+
+func TestSnapshotStatusIncludesConfiguredRefreshFPS(t *testing.T) {
+	metrics := &controllerMetrics{startedAt: time.Now()}
+	hub := &websocketHub{clients: make(map[*websocket.Conn]bool)}
+	status := snapshotStatus(metrics, config{RefreshFPS: 50}, hub, nil)
+	if status.RefreshFPS != 50 {
+		t.Fatalf("refresh fps = %d, want 50", status.RefreshFPS)
 	}
 }
 
