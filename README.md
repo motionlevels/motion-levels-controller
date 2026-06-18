@@ -49,7 +49,7 @@ The defaults are:
 - LED broadcast: `255.255.255.255:4626`
 - controller ID file: `.motion-levels-controller-id`
 - output refresh: `30fps`
-- frame recording directory: `recordings`
+- frame recording: disabled
 - hot-path frame recording compression: `none`
 - background recording compression: `zstd`
 - frame recording rotation: `10m` or `256 MiB`, whichever comes first
@@ -58,13 +58,14 @@ The defaults are:
 - object-storage upload: disabled unless `-record-upload-platform-url` is set
 - game-engine disconnect fade: hold `2s`, then fade to black over `3s`
 
-Frame recording writes one length-prefixed protobuf `FrameRecord` for every
-controller-presented frame after pressure state has been merged. The recorded
-sequence and timestamp come from the controller presentation clock, not the
-source game frame.
+Frame recording is opt-in. When enabled, it writes one length-prefixed protobuf
+`FrameRecord` for every controller-presented frame after pressure state has been
+merged. The recorded sequence and timestamp come from the controller
+presentation clock, not the source game frame.
 
-The default recording target creates one or more timestamped segment files per
-run under the stable controller UUID:
+Enable recording by pointing `-record-frames` at a directory or `.pbstream`
+target. Directory targets create one or more timestamped segment files per run
+under the stable controller UUID:
 
 ```text
 recordings/01234567-89ab-4def-8123-456789abcdef/20260602T154530Z.frames.pbstream.open
@@ -74,7 +75,8 @@ recordings/01234567-89ab-4def-8123-456789abcdef/20260602T154530Z-000002.frames.p
 ```
 
 Passing `recordings/live.frames.pbstream` also resolves to a timestamped
-session file for compatibility with early runs. Disable recording with:
+session file for compatibility with early runs. Recording is disabled by
+default, which is equivalent to:
 
 ```sh
 go run ./floor-controller/cmd/floor-controller -record-frames ""
@@ -98,8 +100,9 @@ If recordings should sync to Google Drive, point `-record-frames` at the local
 synced Drive recordings directory. The controller will still create the
 controller UUID subdirectory inside it.
 
-The controller writes raw protobuf on the presentation path by default, then
-compresses closed segments with `zstd` in a background worker:
+When recording is enabled, the controller writes raw protobuf on the
+presentation path, then compresses closed segments with `zstd` in a background
+worker:
 
 ```sh
 go run ./floor-controller/cmd/floor-controller -record-compression none
@@ -134,6 +137,7 @@ SHA-256, frame count, sequence range, and real timestamps back to the platform:
 ```sh
 MOTION_LEVELS_PLATFORM_TOKEN=... \
 go run ./floor-controller/cmd/floor-controller \
+  -record-frames recordings \
   -record-upload-platform-url https://platform.motionlevels.obis.dev
 ```
 
@@ -143,6 +147,7 @@ game session when the game engine provides one:
 
 ```sh
 go run ./floor-controller/cmd/floor-controller \
+  -record-frames recordings \
   -record-upload-platform-url https://platform.motionlevels.obis.dev \
   -record-upload-session-id session-20260603T100000Z \
   -record-upload-queue-size 256 \

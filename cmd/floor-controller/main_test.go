@@ -138,6 +138,19 @@ func TestConfigMessageUsesControllerOwnedSettings(t *testing.T) {
 	}
 }
 
+func TestConfigMessageDisablesRecordingWhenRecordFramesIsEmpty(t *testing.T) {
+	message := config{
+		FrameAddr:    "127.0.0.1:4201",
+		RecvPort:     7800,
+		RefreshFPS:   30,
+		RecordFrames: "",
+	}.configMessage()
+
+	if message.Recording {
+		t.Fatal("recording should be disabled when RecordFrames is empty")
+	}
+}
+
 func TestPressureProtoFromEventIncludesHardwareAndLogicalCoordinates(t *testing.T) {
 	now := time.Unix(0, 123)
 	record := pressureProtoFromEvent(9, now, pressEvent{
