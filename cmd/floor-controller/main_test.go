@@ -112,14 +112,14 @@ func TestConfigMessageUsesControllerOwnedSettings(t *testing.T) {
 		BroadcastPort:     4626,
 		RecordFrames:      "recordings/live.frames.pbstream",
 		RecordCompression: "gzip",
-		RefreshFPS:        30,
+		RefreshFPS:        50,
 	}.configMessage()
 
 	if message.Type != "config" {
 		t.Fatalf("message type = %q, want config", message.Type)
 	}
-	if message.RefreshFPS != 30 {
-		t.Fatalf("refresh fps = %d, want 30", message.RefreshFPS)
+	if message.RefreshFPS != 50 {
+		t.Fatalf("refresh fps = %d, want 50", message.RefreshFPS)
 	}
 	if message.GridWidth != floor.GridWidth || message.GridHeight != floor.GridHeight {
 		t.Fatalf("grid = %dx%d, want %dx%d", message.GridWidth, message.GridHeight, floor.GridWidth, floor.GridHeight)
@@ -142,7 +142,7 @@ func TestConfigMessageDisablesRecordingWhenRecordFramesIsEmpty(t *testing.T) {
 	message := config{
 		FrameAddr:    "127.0.0.1:4201",
 		RecvPort:     7800,
-		RefreshFPS:   30,
+		RefreshFPS:   50,
 		RecordFrames: "",
 	}.configMessage()
 

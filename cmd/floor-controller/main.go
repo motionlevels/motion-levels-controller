@@ -291,7 +291,7 @@ func parseConfig() config {
 	flag.IntVar(&cfg.LivePushFPS, "live-push-fps", envInt("MOTION_LEVELS_LIVE_PUSH_FPS", 5), "maximum outbound live floor preview push rate; 0 disables")
 	flag.DurationVar(&cfg.LivePushTimeout, "live-push-timeout", envDuration("MOTION_LEVELS_LIVE_PUSH_TIMEOUT", 2*time.Second), "HTTP timeout for live floor preview pushes")
 	flag.StringVar(&cfg.ZstdPath, "zstd-path", "zstd", "path to zstd executable for background recording compression")
-	flag.IntVar(&cfg.RefreshFPS, "refresh-fps", 30, "floor-controller output refresh rate for UDP, websocket, and recording")
+	flag.IntVar(&cfg.RefreshFPS, "refresh-fps", 50, "floor-controller output refresh rate for UDP, websocket, and recording")
 	flag.DurationVar(&cfg.EngineFadeDelay, "engine-fade-delay", 2*time.Second, "time to hold the last game frame after the game-engine disconnects before fading")
 	flag.DurationVar(&cfg.EngineFadeDuration, "engine-fade-duration", 3*time.Second, "duration of the fade to black after engine-fade-delay")
 	flag.Parse()

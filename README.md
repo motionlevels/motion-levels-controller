@@ -48,7 +48,7 @@ The defaults are:
 - UDP receive socket: `:7800`
 - LED broadcast: `255.255.255.255:4626`
 - controller ID file: `.motion-levels-controller-id`
-- output refresh: `30fps`
+- output refresh: `50fps`
 - frame recording: disabled
 - hot-path frame recording compression: `none`
 - background recording compression: `zstd`
@@ -157,7 +157,7 @@ go run ./floor-controller/cmd/floor-controller \
 Tune the hardware, preview, and recording cadence with:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -refresh-fps 30
+go run ./floor-controller/cmd/floor-controller -refresh-fps 50
 ```
 
 If the game-engine connection drops, the controller keeps refreshing the latest
@@ -168,7 +168,7 @@ go run ./floor-controller/cmd/floor-controller -engine-fade-delay 2s -engine-fad
 ```
 
 Uncompressed recordings at the current 16x32 protobuf shape are roughly 6.5 KB
-per frame, or about 0.7 GB per hour at 30fps. Whole-segment `zstd` compression
+per frame, or about 1.2 GB per hour at 50fps. Whole-segment `zstd` compression
 is much more effective for looping animations than per-frame gzip, but it runs
 outside the presentation loop. A sudden process crash can leave the final
 in-flight frame incomplete, but previously completed frames remain recoverable.
