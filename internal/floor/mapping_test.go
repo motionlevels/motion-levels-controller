@@ -20,10 +20,10 @@ func TestKnownMappingCorners(t *testing.T) {
 		channel  int
 		position int
 	}{
-		{x: 0, y: 0, channel: 7, position: 63},
-		{x: 15, y: 0, channel: 7, position: 48},
-		{x: 0, y: 31, channel: 0, position: 0},
-		{x: 15, y: 31, channel: 0, position: 15},
+		{x: 0, y: 0, channel: 7, position: 48},
+		{x: 15, y: 0, channel: 7, position: 63},
+		{x: 0, y: 31, channel: 0, position: 15},
+		{x: 15, y: 31, channel: 0, position: 0},
 	}
 
 	for _, tc := range cases {
