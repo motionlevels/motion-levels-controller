@@ -226,7 +226,7 @@
 
         for (const tile of tiles.values()) {
           const [x, y] = tile.dataset.key.split(",").map(Number);
-          tile.style.gridColumn = orientation === "landscape" ? y + 1 : x + 1;
+          tile.style.gridColumn = orientation === "landscape" ? height - y : width - x;
           tile.style.gridRow = orientation === "landscape" ? x + 1 : y + 1;
         }
       }
