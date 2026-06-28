@@ -72,9 +72,14 @@ type config struct {
 
 type websocketHub struct {
 	mu              sync.Mutex
-	clients         map[*websocket.Conn]bool
+	clients         map[*websocket.Conn]*websocketClient
 	config          configMessage
 	pressureStreams *pressureStreamHub
+}
+
+type websocketClient struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
 }
 
 type pressureStreamHub struct {
@@ -376,7 +381,7 @@ func run(ctx context.Context, cfg config) error {
 	broadcastAddr := &net.UDPAddr{IP: net.ParseIP(cfg.BroadcastIP), Port: cfg.BroadcastPort}
 	metrics := newControllerMetrics()
 	pressureStreams := &pressureStreamHub{clients: make(map[*pressureStreamClient]bool)}
-	hub := &websocketHub{clients: make(map[*websocket.Conn]bool), config: cfg.configMessage(), pressureStreams: pressureStreams}
+	hub := &websocketHub{clients: make(map[*websocket.Conn]*websocketClient), config: cfg.configMessage(), pressureStreams: pressureStreams}
 	state := &controllerState{sensorState: make(map[sensorKey]bool)}
 	frames := &latestFrameBuffer{}
 	frameRecorder, err := recording.NewFrameRecorderWithOptions(cfg.RecordFrames, recording.Options{
@@ -1220,14 +1225,15 @@ func localIPv4s() []string {
 
 func (h *websocketHub) add(conn *websocket.Conn, state *controllerState) {
 	log.Printf("websocket connected")
-	if err := conn.WriteJSON(h.config); err != nil {
+	client := &websocketClient{conn: conn}
+	if err := client.writeJSON(h.config); err != nil {
 		_ = conn.Close()
 		return
 	}
 	h.mu.Lock()
-	h.clients[conn] = true
+	h.clients[conn] = client
 	h.mu.Unlock()
-	go h.readClient(conn, state)
+	go h.readClient(client, state)
 }
 
 func (h *websocketHub) clientCount() int {
@@ -1236,17 +1242,14 @@ func (h *websocketHub) clientCount() int {
 	return len(h.clients)
 }
 
-func (h *websocketHub) readClient(conn *websocket.Conn, state *controllerState) {
+func (h *websocketHub) readClient(client *websocketClient, state *controllerState) {
 	defer func() {
-		h.mu.Lock()
-		delete(h.clients, conn)
-		h.mu.Unlock()
-		_ = conn.Close()
+		h.removeClient(client)
 	}()
 
 	for {
 		var message inputMessage
-		if err := conn.ReadJSON(&message); err != nil {
+		if err := client.conn.ReadJSON(&message); err != nil {
 			return
 		}
 		if message.Type != "press" || !floor.InLogicalBounds(message.X, message.Y) {
@@ -1287,25 +1290,58 @@ func (h *websocketHub) broadcastJSON(message any) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for client := range h.clients {
-		if err := client.WriteMessage(websocket.TextMessage, data); err != nil {
-			_ = client.Close()
-			delete(h.clients, client)
+	h.broadcast(websocket.TextMessage, data)
+}
+
+func (h *websocketHub) broadcastBinary(data []byte) {
+	h.broadcast(websocket.BinaryMessage, data)
+}
+
+func (h *websocketHub) broadcast(messageType int, data []byte) {
+	for _, client := range h.snapshotClients() {
+		if err := client.writeMessage(messageType, data); err != nil {
+			h.removeClient(client)
 		}
 	}
 }
 
-func (h *websocketHub) broadcastBinary(data []byte) {
+func (h *websocketHub) snapshotClients() []*websocketClient {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for client := range h.clients {
-		if err := client.WriteMessage(websocket.BinaryMessage, data); err != nil {
-			_ = client.Close()
-			delete(h.clients, client)
-		}
+	clients := make([]*websocketClient, 0, len(h.clients))
+	for _, client := range h.clients {
+		clients = append(clients, client)
 	}
+	return clients
+}
+
+func (h *websocketHub) removeClient(client *websocketClient) {
+	if client == nil || client.conn == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.clients[client.conn] == client {
+		delete(h.clients, client.conn)
+	}
+	h.mu.Unlock()
+	_ = client.conn.Close()
+}
+
+func (c *websocketClient) writeJSON(message any) error {
+	data, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+	return c.writeMessage(websocket.TextMessage, data)
+}
+
+func (c *websocketClient) writeMessage(messageType int, data []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+	err := c.conn.WriteMessage(messageType, data)
+	_ = c.conn.SetWriteDeadline(time.Time{})
+	return err
 }
 
 func (h *pressureStreamHub) add(client *pressureStreamClient) {

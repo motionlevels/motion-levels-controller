@@ -83,10 +83,32 @@ func TestLatestFrameBufferCopiesIncomingFrame(t *testing.T) {
 
 func TestSnapshotStatusIncludesConfiguredRefreshFPS(t *testing.T) {
 	metrics := &controllerMetrics{startedAt: time.Now()}
-	hub := &websocketHub{clients: make(map[*websocket.Conn]bool)}
+	hub := &websocketHub{clients: make(map[*websocket.Conn]*websocketClient)}
 	status := snapshotStatus(metrics, config{RefreshFPS: 50}, hub, nil)
 	if status.RefreshFPS != 50 {
 		t.Fatalf("refresh fps = %d, want 50", status.RefreshFPS)
+	}
+}
+
+func TestSnapshotStatusDoesNotWaitForClientWriteLock(t *testing.T) {
+	metrics := &controllerMetrics{startedAt: time.Now()}
+	client := &websocketClient{}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	hub := &websocketHub{clients: map[*websocket.Conn]*websocketClient{nil: client}}
+
+	done := make(chan statusMessage, 1)
+	go func() {
+		done <- snapshotStatus(metrics, config{RefreshFPS: 50}, hub, nil)
+	}()
+
+	select {
+	case status := <-done:
+		if status.WebsocketClients != 1 {
+			t.Fatalf("websocket clients = %d, want 1", status.WebsocketClients)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("snapshotStatus waited for a client write lock")
 	}
 }
 
