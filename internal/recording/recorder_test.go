@@ -389,7 +389,7 @@ func marshalTestRecord(t *testing.T, sequence uint64) []byte {
 	return payload
 }
 
-func readFrameRecord(t *testing.T, path string, compressed bool) recordingpb.FrameRecord {
+func readFrameRecord(t *testing.T, path string, compressed bool) *recordingpb.FrameRecord {
 	t.Helper()
 
 	file, err := os.Open(path)
@@ -418,8 +418,8 @@ func readFrameRecord(t *testing.T, path string, compressed bool) recordingpb.Fra
 		t.Fatal(err)
 	}
 
-	var record recordingpb.FrameRecord
-	if err := proto.Unmarshal(payload, &record); err != nil {
+	record := &recordingpb.FrameRecord{}
+	if err := proto.Unmarshal(payload, record); err != nil {
 		t.Fatal(err)
 	}
 	return record
