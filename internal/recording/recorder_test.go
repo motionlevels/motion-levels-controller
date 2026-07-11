@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lobis/motion-levels/floor-controller/internal/floor"
-	"github.com/lobis/motion-levels/packages/contracts/recordingpb"
+	"github.com/motionlevels/motion-levels-controller/contracts/recordingpb"
+	"github.com/motionlevels/motion-levels-controller/internal/floor"
 	"google.golang.org/protobuf/proto"
 )
 

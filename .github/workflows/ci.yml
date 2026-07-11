@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: controller-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "35.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install protoc-gen-go
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+
+      - name: Validate
+        run: make check
+
+      - name: Build image
+        run: docker build --build-arg "BUILD_REVISION=${GITHUB_SHA}" -t motion-levels-controller:ci .
+
+      - name: Smoke test the confined image
+        run: |
+          docker run --detach --name motion-levels-controller-ci \
+            --network host \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+            --tmpfs /var/lib/motion-levels/floor-controller:rw,noexec,nosuid,nodev,size=4m,uid=10001,gid=10001 \
+            motion-levels-controller:ci \
+            -broadcast-ip 127.0.0.1
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:4101/health && exit 0
+            sleep 1
+          done
+          docker logs motion-levels-controller-ci
+          exit 1

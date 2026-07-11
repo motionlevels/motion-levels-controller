@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/lobis/motion-levels/floor-controller/internal/floor"
-	"github.com/lobis/motion-levels/packages/contracts/recordingpb"
+	"github.com/motionlevels/motion-levels-controller/contracts/recordingpb"
+	"github.com/motionlevels/motion-levels-controller/internal/floor"
 )
 
 func TestWebAndUDPPushSamePressureState(t *testing.T) {

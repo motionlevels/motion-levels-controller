@@ -27,12 +27,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/lobis/motion-levels/floor-controller/internal/controllerid"
-	"github.com/lobis/motion-levels/floor-controller/internal/floor"
-	"github.com/lobis/motion-levels/floor-controller/internal/recording"
-	"github.com/lobis/motion-levels/packages/contracts/inputpb"
-	"github.com/lobis/motion-levels/packages/contracts/pbstream"
-	"github.com/lobis/motion-levels/packages/contracts/recordingpb"
+	"github.com/motionlevels/motion-levels-controller/contracts/inputpb"
+	"github.com/motionlevels/motion-levels-controller/contracts/pbstream"
+	"github.com/motionlevels/motion-levels-controller/contracts/recordingpb"
+	"github.com/motionlevels/motion-levels-controller/internal/controllerid"
+	"github.com/motionlevels/motion-levels-controller/internal/floor"
+	"github.com/motionlevels/motion-levels-controller/internal/recording"
 	"google.golang.org/protobuf/proto"
 )
 

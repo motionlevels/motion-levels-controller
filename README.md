@@ -1,4 +1,15 @@
-# Floor Controller
+# Motion Levels Controller
+
+This repository owns the floor controller source and the immutable
+`ghcr.io/motionlevels/motion-levels-controller:sha-<full-commit>` image. The
+platform repository promotes an exact controller revision into an atomic venue
+release; this repository never deploys itself or runs an automatic updater.
+
+The engine/controller protobuf streams and the browser `MLF1` format are
+protocol `v1`. Their schemas live under `contracts/` so changes are explicit
+and reviewable. The controller uses host networking for UDP floor broadcast,
+but the production container is non-root, read-only, capability-free, and has
+no device mappings.
 
 The floor controller is the local hardware-facing service.
 
@@ -22,7 +33,7 @@ connection immediately so streams cannot race each other.
 For local preview without touching the real floor:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -http 127.0.0.1:4101 -broadcast-ip 127.0.0.1
+go run ./cmd/motion-levels-controller -http 127.0.0.1:4101 -broadcast-ip 127.0.0.1
 ```
 
 Open:
@@ -37,7 +48,7 @@ other machines on the same network can open the LAN URL printed at startup.
 For a real floor on the local network, use the default broadcast address:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller
+go run ./cmd/motion-levels-controller
 ```
 
 The defaults are:
@@ -79,20 +90,20 @@ session file for compatibility with early runs. Recording is disabled by
 default, which is equivalent to:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -record-frames ""
+go run ./cmd/motion-levels-controller -record-frames ""
 ```
 
 The controller ID is generated once and reused on later starts:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -controller-id-file .motion-levels-controller-id
+go run ./cmd/motion-levels-controller -controller-id-file .motion-levels-controller-id
 ```
 
 For a deployed controller, keep this file outside the git checkout so updates do
 not change the identity:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller \
+go run ./cmd/motion-levels-controller \
   -controller-id-file /var/lib/motion-levels/floor-controller/controller-id
 ```
 
@@ -105,20 +116,20 @@ presentation path, then compresses closed segments with `zstd` in a background
 worker:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -record-compression none
-go run ./floor-controller/cmd/floor-controller -record-post-compression zstd
+go run ./cmd/motion-levels-controller -record-compression none
+go run ./cmd/motion-levels-controller -record-post-compression zstd
 ```
 
 Segments rotate before they would exceed the configured byte limit or duration:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -record-segment-bytes 268435456 -record-segment-duration 10m
+go run ./cmd/motion-levels-controller -record-segment-bytes 268435456 -record-segment-duration 10m
 ```
 
 Raw `.pbstream` files are deleted one hour after a verified `.zst` exists:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -record-delete-raw-after 1h
+go run ./cmd/motion-levels-controller -record-delete-raw-after 1h
 ```
 
 If compression is broken or falls behind, raw files are allowed to accumulate
@@ -126,7 +137,7 @@ only up to the configured cap. After that, recording stops instead of risking
 the whole machine running out of storage:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -record-max-pending-raw-bytes 4294967296
+go run ./cmd/motion-levels-controller -record-max-pending-raw-bytes 4294967296
 ```
 
 Closed recording segments can also upload directly to RustFS through the
@@ -136,7 +147,7 @@ SHA-256, frame count, sequence range, and real timestamps back to the platform:
 
 ```sh
 MOTION_LEVELS_PLATFORM_TOKEN=... \
-go run ./floor-controller/cmd/floor-controller \
+go run ./cmd/motion-levels-controller \
   -record-frames recordings \
   -record-upload-platform-url https://platform.motionlevels.obis.dev
 ```
@@ -146,7 +157,7 @@ network writes do not block floor refresh. Attach uploaded segments to a known
 game session when the game engine provides one:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller \
+go run ./cmd/motion-levels-controller \
   -record-frames recordings \
   -record-upload-platform-url https://platform.motionlevels.obis.dev \
   -record-upload-session-id session-20260603T100000Z \
@@ -157,14 +168,14 @@ go run ./floor-controller/cmd/floor-controller \
 Tune the hardware, preview, and recording cadence with:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -refresh-fps 50
+go run ./cmd/motion-levels-controller -refresh-fps 50
 ```
 
 If the game-engine connection drops, the controller keeps refreshing the latest
 frame briefly, then fades the hardware and live preview to black:
 
 ```sh
-go run ./floor-controller/cmd/floor-controller -engine-fade-delay 2s -engine-fade-duration 3s
+go run ./cmd/motion-levels-controller -engine-fade-delay 2s -engine-fade-duration 3s
 ```
 
 Uncompressed recordings at the current 16x32 protobuf shape are roughly 6.5 KB
