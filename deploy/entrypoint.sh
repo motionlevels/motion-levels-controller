@@ -11,6 +11,7 @@ exec /app/bin/motion-levels-controller \
   -frames "${MOTION_LEVELS_CONTROLLER_FRAMES:-127.0.0.1:4201}" \
   -input-events "${MOTION_LEVELS_CONTROLLER_INPUT_EVENTS:-127.0.0.1:4202}" \
   -recv-port "${MOTION_LEVELS_FLOOR_RECV_PORT:-7800}" \
+  -floor-source-ip "${MOTION_LEVELS_FLOOR_SOURCE_IP:-}" \
   -broadcast-ip "${MOTION_LEVELS_LED_BROADCAST_IP:-255.255.255.255}" \
   -broadcast-port "${MOTION_LEVELS_LED_BROADCAST_PORT:-4626}" \
   -controller-id-file /var/lib/motion-levels/floor-controller/controller-id \

@@ -33,6 +33,7 @@ import (
 	"github.com/motionlevels/motion-levels-controller/internal/controllerid"
 	"github.com/motionlevels/motion-levels-controller/internal/floor"
 	"github.com/motionlevels/motion-levels-controller/internal/recording"
+	"golang.org/x/net/ipv4"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -44,6 +45,7 @@ type config struct {
 	FrameAddr                string
 	InputAddr                string
 	RecvPort                 int
+	FloorSourceIP            string
 	BroadcastIP              string
 	BroadcastPort            int
 	ControllerID             string
@@ -182,6 +184,7 @@ type configMessage struct {
 	InputAddr       string `json:"inputAddr"`
 	RecvPort        int    `json:"recvPort"`
 	BroadcastAddr   string `json:"broadcastAddr"`
+	FloorSourceIP   string `json:"floorSourceIp,omitempty"`
 	ControllerID    string `json:"controllerId"`
 	Recording       bool   `json:"recording"`
 	Compression     string `json:"compression"`
@@ -275,6 +278,7 @@ func parseConfig() config {
 	flag.StringVar(&cfg.FrameAddr, "frames", "127.0.0.1:4201", "TCP address for length-prefixed protobuf frame stream")
 	flag.StringVar(&cfg.InputAddr, "input-events", "127.0.0.1:4202", "TCP address for pressure event subscribers; empty disables")
 	flag.IntVar(&cfg.RecvPort, "recv-port", 7800, "UDP port for tile handshake/sensor packets")
+	flag.StringVar(&cfg.FloorSourceIP, "floor-source-ip", os.Getenv("MOTION_LEVELS_FLOOR_SOURCE_IP"), "local IPv4 source address for floor UDP output; empty uses the default route")
 	flag.StringVar(&cfg.BroadcastIP, "broadcast-ip", "255.255.255.255", "UDP broadcast IP for LED packets")
 	flag.IntVar(&cfg.BroadcastPort, "broadcast-port", 4626, "UDP broadcast port for LED packets")
 	flag.StringVar(&cfg.ControllerID, "controller-id", "", "stable controller UUID override; normally leave empty and use controller-id-file")
@@ -313,6 +317,11 @@ func (c config) validate() error {
 	}
 	if c.BroadcastPort < 1 || c.BroadcastPort > 65535 {
 		errs = append(errs, fmt.Errorf("broadcast-port must be between 1 and 65535"))
+	}
+	if value := strings.TrimSpace(c.FloorSourceIP); value != "" {
+		if parsed := net.ParseIP(value); parsed == nil || parsed.To4() == nil {
+			errs = append(errs, fmt.Errorf("floor-source-ip must be a valid IPv4 address"))
+		}
 	}
 	if !recording.SupportedCompression(c.RecordCompression) {
 		errs = append(errs, fmt.Errorf("record-compression must be gzip or none"))
@@ -377,6 +386,10 @@ func run(ctx context.Context, cfg config) error {
 		return err
 	}
 	defer conn.Close()
+	sender, err := newUDPSender(conn, cfg.FloorSourceIP)
+	if err != nil {
+		return err
+	}
 
 	broadcastAddr := &net.UDPAddr{IP: net.ParseIP(cfg.BroadcastIP), Port: cfg.BroadcastPort}
 	metrics := newControllerMetrics()
@@ -421,8 +434,8 @@ func run(ctx context.Context, cfg config) error {
 	go readUDP(ctx, conn, state, hub, pressureStreams)
 	go serveHTTP(ctx, cfg, hub, state, metrics, frameRecorder)
 	go listenPressureSubscribers(ctx, cfg.InputAddr, pressureStreams)
-	go syncLoop(ctx, conn, broadcastAddr, metrics)
-	go presentationLoop(ctx, cfg, conn, broadcastAddr, hub, state, frames, frameRecorder, metrics, livePusher)
+	go syncLoop(ctx, sender, broadcastAddr, metrics)
+	go presentationLoop(ctx, cfg, sender, broadcastAddr, hub, state, frames, frameRecorder, metrics, livePusher)
 	return listenFrameStream(ctx, cfg.FrameAddr, func(record *recordingpb.FrameRecord, receivedAt time.Time) {
 		metrics.markGameFrame(record, receivedAt)
 		frames.update(record)
@@ -454,6 +467,55 @@ func setBroadcast(conn *net.UDPConn) error {
 		return err
 	}
 	return setErr
+}
+
+type udpSender struct {
+	conn    *net.UDPConn
+	packet  *ipv4.PacketConn
+	control *ipv4.ControlMessage
+}
+
+func newUDPSender(conn *net.UDPConn, sourceIPValue string) (*udpSender, error) {
+	sourceIPValue = strings.TrimSpace(sourceIPValue)
+	if sourceIPValue == "" {
+		return &udpSender{conn: conn}, nil
+	}
+
+	sourceIP := net.ParseIP(sourceIPValue)
+	if sourceIP == nil || sourceIP.To4() == nil {
+		return nil, fmt.Errorf("floor UDP source %q is not a valid IPv4 address", sourceIPValue)
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("list interfaces for floor UDP source: %w", err)
+	}
+	for _, networkInterface := range interfaces {
+		addresses, err := networkInterface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			addressIP, _, err := net.ParseCIDR(address.String())
+			if err == nil && addressIP.Equal(sourceIP) {
+				return &udpSender{
+					conn:   conn,
+					packet: ipv4.NewPacketConn(conn),
+					control: &ipv4.ControlMessage{
+						IfIndex: networkInterface.Index,
+						Src:     sourceIP.To4(),
+					},
+				}, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("floor UDP source %s is not assigned to a local interface", sourceIPValue)
+}
+
+func (s *udpSender) WriteToUDP(packet []byte, addr *net.UDPAddr) (int, error) {
+	if s.control == nil {
+		return s.conn.WriteToUDP(packet, addr)
+	}
+	return s.packet.WriteTo(packet, s.control, addr)
 }
 
 func readUDP(ctx context.Context, conn *net.UDPConn, state *controllerState, hub *websocketHub, pressureStreams *pressureStreamHub) {
@@ -700,7 +762,7 @@ func (g *gameEngineStreamGate) release() {
 	g.active = false
 }
 
-func presentationLoop(ctx context.Context, cfg config, conn *net.UDPConn, addr *net.UDPAddr, hub *websocketHub, state *controllerState, frames *latestFrameBuffer, recorder *recording.FrameRecorder, metrics *controllerMetrics, livePusher *liveFramePusher) {
+func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *net.UDPAddr, hub *websocketHub, state *controllerState, frames *latestFrameBuffer, recorder *recording.FrameRecorder, metrics *controllerMetrics, livePusher *liveFramePusher) {
 	log.Printf("presentation refresh: %d fps", cfg.RefreshFPS)
 	ticker := time.NewTicker(time.Second / time.Duration(cfg.RefreshFPS))
 	defer ticker.Stop()
@@ -731,7 +793,7 @@ func presentationLoop(ctx context.Context, cfg config, conn *net.UDPConn, addr *
 			if err := recorder.RecordFrameWithLineage(sequence, now.UnixNano(), frame.Width, frame.Height, tiles, lineage); err != nil {
 				log.Printf("record frame: %v", err)
 			}
-			sendFrame(conn, addr, tiles, metrics)
+			sendFrame(sender, addr, tiles, metrics)
 			metrics.markPresented(sequence, now, frame)
 			viewerFrame := buildViewerFrame(sequence, frame.Width, frame.Height, tiles)
 			hub.broadcastBinary(viewerFrame)
@@ -1014,8 +1076,8 @@ func (m *controllerMetrics) markUDPError() {
 	m.udpSendErrors.Add(1)
 }
 
-func syncLoop(ctx context.Context, conn *net.UDPConn, addr *net.UDPAddr, metrics *controllerMetrics) {
-	sendSync(conn, addr, metrics)
+func syncLoop(ctx context.Context, sender *udpSender, addr *net.UDPAddr, metrics *controllerMetrics) {
+	sendSync(sender, addr, metrics)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -1023,14 +1085,14 @@ func syncLoop(ctx context.Context, conn *net.UDPConn, addr *net.UDPAddr, metrics
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sendSync(conn, addr, metrics)
+			sendSync(sender, addr, metrics)
 		}
 	}
 }
 
-func sendSync(conn *net.UDPConn, addr *net.UDPAddr, metrics *controllerMetrics) {
+func sendSync(sender *udpSender, addr *net.UDPAddr, metrics *controllerMetrics) {
 	packet := floor.BuildSyncPacket(0, 0, floor.DefaultChannels, []byte{255, 255, 255, 255})
-	if _, err := conn.WriteToUDP(packet, addr); err != nil {
+	if _, err := sender.WriteToUDP(packet, addr); err != nil {
 		metrics.markUDPError()
 		log.Printf("send sync: %v", err)
 		return
@@ -1038,7 +1100,7 @@ func sendSync(conn *net.UDPConn, addr *net.UDPAddr, metrics *controllerMetrics) 
 	log.Printf("sync broadcast sent to %s", addr)
 }
 
-func sendFrame(conn *net.UDPConn, addr *net.UDPAddr, tiles []floor.Tile, metrics *controllerMetrics) {
+func sendFrame(sender *udpSender, addr *net.UDPAddr, tiles []floor.Tile, metrics *controllerMetrics) {
 	grid := colorGridFromTiles(tiles)
 	packets := floor.BuildFrame(
 		floor.DefaultControllers,
@@ -1053,7 +1115,7 @@ func sendFrame(conn *net.UDPConn, addr *net.UDPAddr, tiles []floor.Tile, metrics
 		},
 	)
 	for _, packet := range packets {
-		if _, err := conn.WriteToUDP(packet, addr); err != nil {
+		if _, err := sender.WriteToUDP(packet, addr); err != nil {
 			metrics.markUDPError()
 			log.Printf("send frame: %v", err)
 			return
@@ -1170,6 +1232,7 @@ func (c config) configMessage() configMessage {
 		InputAddr:       c.InputAddr,
 		RecvPort:        c.RecvPort,
 		BroadcastAddr:   fmt.Sprintf("%s:%d", c.BroadcastIP, c.BroadcastPort),
+		FloorSourceIP:   c.FloorSourceIP,
 		ControllerID:    c.ControllerID,
 		Recording:       c.RecordFrames != "",
 		Compression:     recording.NormalizeCompression(c.RecordCompression),
@@ -1500,5 +1563,5 @@ func (c config) String() string {
 	if strings.TrimSpace(c.LivePushPlatformURL) != "" && c.LivePushFPS > 0 {
 		livePush = fmt.Sprintf("%s@%dfps", c.LivePushPlatformURL, c.LivePushFPS)
 	}
-	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s refresh=%dfps udp=:%d broadcast=%s:%d record-compression=%s post-compression=%s record-segment-bytes=%d record-segment-duration=%s delete-raw-after=%s max-pending-raw=%d record-upload=%s live-push=%s fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.RefreshFPS, c.RecvPort, c.BroadcastIP, c.BroadcastPort, recording.NormalizeCompression(c.RecordCompression), recording.NormalizePostCompression(c.RecordPostCompression), c.RecordSegmentBytes, c.RecordSegmentDuration, c.RecordDeleteRawAfter, c.RecordMaxPendingRawBytes, upload, livePush, c.EngineFadeDelay, c.EngineFadeDuration)
+	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s refresh=%dfps udp=:%d floor-source-ip=%s broadcast=%s:%d record-compression=%s post-compression=%s record-segment-bytes=%d record-segment-duration=%s delete-raw-after=%s max-pending-raw=%d record-upload=%s live-push=%s fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.RefreshFPS, c.RecvPort, c.FloorSourceIP, c.BroadcastIP, c.BroadcastPort, recording.NormalizeCompression(c.RecordCompression), recording.NormalizePostCompression(c.RecordPostCompression), c.RecordSegmentBytes, c.RecordSegmentDuration, c.RecordDeleteRawAfter, c.RecordMaxPendingRawBytes, upload, livePush, c.EngineFadeDelay, c.EngineFadeDuration)
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"net"
 	"testing"
 	"time"
 
@@ -130,6 +131,7 @@ func TestConfigMessageUsesControllerOwnedSettings(t *testing.T) {
 	message := config{
 		FrameAddr:         "127.0.0.1:4201",
 		RecvPort:          7800,
+		FloorSourceIP:     "127.0.0.1",
 		BroadcastIP:       "127.0.0.1",
 		BroadcastPort:     4626,
 		RecordFrames:      "recordings/live.frames.pbstream",
@@ -149,6 +151,9 @@ func TestConfigMessageUsesControllerOwnedSettings(t *testing.T) {
 	if message.BroadcastAddr != "127.0.0.1:4626" {
 		t.Fatalf("broadcast address = %q, want 127.0.0.1:4626", message.BroadcastAddr)
 	}
+	if message.FloorSourceIP != "127.0.0.1" {
+		t.Fatalf("floor source IP = %q, want 127.0.0.1", message.FloorSourceIP)
+	}
 	if message.InputAddr != "" {
 		t.Fatalf("input address = %q, want empty default from test config", message.InputAddr)
 	}
@@ -157,6 +162,42 @@ func TestConfigMessageUsesControllerOwnedSettings(t *testing.T) {
 	}
 	if message.Compression != "gzip" {
 		t.Fatalf("compression = %q, want gzip", message.Compression)
+	}
+}
+
+func TestUDPSenderPinsConfiguredLoopbackSource(t *testing.T) {
+	receiver, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+
+	conn, err := openUDP(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	sender, err := newUDPSender(conn, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := sender.WriteToUDP([]byte("floor-source"), receiver.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 64)
+	if err := receiver.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	count, source, err := receiver.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(buffer[:count]); got != "floor-source" {
+		t.Fatalf("payload = %q, want floor-source", got)
+	}
+	if !source.IP.Equal(net.ParseIP("127.0.0.1")) {
+		t.Fatalf("source IP = %s, want 127.0.0.1", source.IP)
 	}
 }
 
@@ -242,6 +283,7 @@ func TestConfigValidationRejectsInvalidHardwareConfig(t *testing.T) {
 		FrameAddr:         "127.0.0.1:4201",
 		RecvPort:          0,
 		BroadcastIP:       "not-an-ip",
+		FloorSourceIP:     "not-an-ip",
 		BroadcastPort:     4626,
 		RecordFrames:      "recordings",
 		RecordCompression: "zstd",
