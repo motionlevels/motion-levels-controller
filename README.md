@@ -2,7 +2,7 @@
 
 This repository owns the floor controller source and the immutable
 `ghcr.io/motionlevels/motion-levels-controller:sha-<full-commit>` image. The
-platform repository promotes an exact controller revision into an atomic venue
+venue repository promotes an exact controller revision into an atomic venue
 release; this repository never deploys itself or runs an automatic updater.
 
 The engine/controller protobuf streams and the browser `MLF1` format are
@@ -12,6 +12,10 @@ but the production container is non-root, read-only, capability-free, and has
 no device mappings.
 
 The floor controller is the local hardware-facing service.
+
+Display and kiosk status, restart, and host service management belong to venue
+host tooling. The confined controller container does not inspect or control
+host systemd services.
 
 It does not produce game animations. It receives logical board frames from
 `game-engine` over a length-prefixed protobuf stream, then:

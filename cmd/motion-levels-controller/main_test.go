@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/binary"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -10,6 +12,26 @@ import (
 	"github.com/motionlevels/motion-levels-controller/contracts/recordingpb"
 	"github.com/motionlevels/motion-levels-controller/internal/floor"
 )
+
+func TestHTTPHandlerDoesNotExposeHostKioskControl(t *testing.T) {
+	handler := newHTTPHandler(config{}, nil, nil, nil, nil)
+	for _, testCase := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/tv"},
+		{method: http.MethodPost, path: "/tv/refresh"},
+	} {
+		t.Run(testCase.method+" "+testCase.path, func(t *testing.T) {
+			request := httptest.NewRequest(testCase.method, testCase.path, nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+			}
+		})
+	}
+}
 
 func TestWebAndUDPPushSamePressureState(t *testing.T) {
 	state := &controllerState{sensorState: make(map[sensorKey]bool)}
