@@ -22,11 +22,11 @@ message PressureEvent {
 }
 ```
 
-The intended future stream is:
+The live stream is:
 
 ```text
 floor-controller -> game-engine
 ```
 
-This stream should be event-driven and low latency. It is separate from the
+This stream is event-driven and low latency. It is separate from the
 controller-presented `FrameRecord` recording stream.

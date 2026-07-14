@@ -8,6 +8,10 @@ services:
     init: true
     restart: unless-stopped
     network_mode: host
+    environment:
+      # Keep local compose runs away from the production floor broadcast.
+      MOTION_LEVELS_FLOOR_SOURCE_IP: 127.0.0.1
+      MOTION_LEVELS_LED_BROADCAST_IP: 127.0.0.1
     volumes:
       - controller-state:/var/lib/motion-levels/floor-controller
     read_only: true

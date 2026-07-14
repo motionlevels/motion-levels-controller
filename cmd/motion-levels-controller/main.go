@@ -581,7 +581,7 @@ func listenPressureSubscribers(ctx context.Context, addr string, hub *pressureSt
 	}
 }
 
-func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *controllerState, metrics *controllerMetrics, recorder *recording.FrameRecorder) {
+func newHTTPHandler(cfg config, hub *websocketHub, state *controllerState, metrics *controllerMetrics, recorder *recording.FrameRecorder) http.Handler {
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
 		log.Fatal(err)
@@ -622,36 +622,6 @@ func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *contro
 			log.Printf("status response: %v", err)
 		}
 	})
-	mux.HandleFunc("/tv", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		if r.Method == http.MethodHead {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		if err := json.NewEncoder(w).Encode(currentTVStatus(r.Context())); err != nil {
-			log.Printf("tv status response: %v", err)
-		}
-	})
-	mux.HandleFunc("/tv/refresh", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		if err := restartKiosk(r.Context()); err != nil {
-			log.Printf("tv refresh: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "tv": currentTVStatus(r.Context())})
-	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -661,11 +631,14 @@ func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *contro
 		w.Header().Set("Cache-Control", "no-store")
 		w.Write(index)
 	})
+	return mux
+}
 
+func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *controllerState, metrics *controllerMetrics, recorder *recording.FrameRecorder) {
 	for _, url := range previewURLs(cfg.HTTPAddr, "/") {
 		log.Printf("preview: %s", url)
 	}
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: mux}
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: newHTTPHandler(cfg, hub, state, metrics, recorder)}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
