@@ -58,3 +58,7 @@ jobs:
           done
           docker logs motion-levels-controller-ci
           exit 1
+
+      - name: Remove smoke-test container
+        if: always()
+        run: docker rm --force motion-levels-controller-ci || true
