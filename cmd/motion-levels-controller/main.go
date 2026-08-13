@@ -2,22 +2,15 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"embed"
-	"encoding/base64"
-	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"math"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -26,50 +19,26 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/motionlevels/motion-levels-controller/contracts/inputpb"
 	"github.com/motionlevels/motion-levels-controller/contracts/pbstream"
 	"github.com/motionlevels/motion-levels-controller/contracts/recordingpb"
-	"github.com/motionlevels/motion-levels-controller/internal/controllerid"
 	"github.com/motionlevels/motion-levels-controller/internal/floor"
 	"golang.org/x/net/ipv4"
 	"google.golang.org/protobuf/proto"
 )
 
-//go:embed web
-var webFS embed.FS
-
 type config struct {
-	HTTPAddr            string
-	FrameAddr           string
-	InputAddr           string
-	DuplexAddr          string
-	RecvPort            int
-	FloorSourceIP       string
-	BroadcastIP         string
-	BroadcastPort       int
-	ControllerID        string
-	ControllerIDFile    string
-	LivePushPlatformURL string
-	LivePushToken       string
-	LivePushFPS         int
-	LivePushTimeout     time.Duration
-	RefreshFPS          int
-	EngineFadeDelay     time.Duration
-	EngineFadeDuration  time.Duration
-}
-
-type websocketHub struct {
-	mu              sync.Mutex
-	clients         map[*websocket.Conn]*websocketClient
-	config          configMessage
-	pressureStreams *pressureStreamHub
-	duplex          *duplexHub
-}
-
-type websocketClient struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
+	HTTPAddr           string
+	FrameAddr          string
+	InputAddr          string
+	DuplexAddr         string
+	RecvPort           int
+	FloorSourceIP      string
+	BroadcastIP        string
+	BroadcastPort      int
+	RefreshFPS         int
+	EngineFadeDelay    time.Duration
+	EngineFadeDuration time.Duration
 }
 
 type pressureStreamHub struct {
@@ -136,78 +105,27 @@ type pressEvent struct {
 	Pressed    bool
 }
 
-type liveFloorPushJob struct {
-	ControllerID       string `json:"controllerId"`
-	SessionID          string `json:"sessionId,omitempty"`
-	Sequence           uint64 `json:"sequence"`
-	Width              uint32 `json:"width"`
-	Height             uint32 `json:"height"`
-	PresentedUnixNanos int64  `json:"presentedUnixNanos"`
-	FrameBase64        string `json:"frameBase64"`
-}
-
-type liveFramePusher struct {
-	endpoint     string
-	token        string
-	interval     time.Duration
-	client       *http.Client
-	jobs         chan liveFloorPushJob
-	lastEnqueued time.Time
-	lastErrorLog time.Time
-}
-
-type inputMessage struct {
-	Type    string `json:"type"`
-	X       int    `json:"x"`
-	Y       int    `json:"y"`
-	Pressed bool   `json:"pressed"`
-}
-
-type configMessage struct {
-	Type          string `json:"type"`
-	RefreshFPS    int    `json:"refreshFps"`
-	GridWidth     int    `json:"gridWidth"`
-	GridHeight    int    `json:"gridHeight"`
-	FrameAddr     string `json:"frameAddr"`
-	InputAddr     string `json:"inputAddr"`
-	RecvPort      int    `json:"recvPort"`
-	BroadcastAddr string `json:"broadcastAddr"`
-	FloorSourceIP string `json:"floorSourceIp,omitempty"`
-	ControllerID  string `json:"controllerId"`
-}
-
 type statusMessage struct {
-	Type              string     `json:"type"`
-	UptimeSeconds     int64      `json:"uptimeSeconds"`
-	PresentedFrames   uint64     `json:"presentedFrames"`
-	ActualFPS         float64    `json:"actualFps"`
-	RefreshFPS        int        `json:"refreshFps"`
-	WebsocketClients  int        `json:"websocketClients"`
-	UDPErrorCount     uint64     `json:"udpErrorCount"`
-	GameFrameAgeMS    int64      `json:"gameFrameAgeMs"`
-	GameFrameSequence uint64     `json:"gameFrameSequence"`
-	GameEngineOnline  bool       `json:"gameEngineOnline"`
-	EngineFadeAmount  float64    `json:"engineFadeAmount"`
-	ControllerID      string     `json:"controllerId"`
-	Sync              syncStatus `json:"sync"`
+	UptimeSeconds     int64
+	PresentedFrames   uint64
+	ActualFPS         float64
+	RefreshFPS        int
+	UDPErrorCount     uint64
+	GameFrameAgeMS    int64
+	GameFrameSequence uint64
+	GameEngineOnline  bool
+	EngineFadeAmount  float64
+	Sync              syncStatus
 }
 
 type syncStatus struct {
-	Status                string  `json:"status"`
-	SessionID             string  `json:"sessionId,omitempty"`
-	Samples               uint64  `json:"samples"`
-	EngineClockOffsetMS   float64 `json:"engineClockOffsetMs"`
-	PresentLatencyMS      float64 `json:"presentLatencyMs"`
-	JitterMS              float64 `json:"jitterMs"`
-	LastGameFrameSequence uint64  `json:"lastGameFrameSequence"`
-}
-
-type pressureMessage struct {
-	Type    string `json:"type"`
-	X       int    `json:"x"`
-	Y       int    `json:"y"`
-	Pressed bool   `json:"pressed"`
-	Source  string `json:"source"`
+	Status                string
+	SessionID             string
+	Samples               uint64
+	EngineClockOffsetMS   float64
+	PresentLatencyMS      float64
+	JitterMS              float64
+	LastGameFrameSequence uint64
 }
 
 func main() {
@@ -224,41 +142,9 @@ func main() {
 	}
 }
 
-func envInt(name string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	var parsed int
-	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func envDuration(name string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := time.ParseDuration(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
 func parseConfig() config {
 	cfg := config{}
-	livePushPlatformURL := os.Getenv("MOTION_LEVELS_LIVE_PUSH_PLATFORM_URL")
-	if strings.TrimSpace(livePushPlatformURL) == "" {
-		livePushPlatformURL = os.Getenv("MOTION_LEVELS_PLATFORM_URL")
-	}
-	livePushToken := os.Getenv("MOTION_LEVELS_LIVE_PUSH_TOKEN")
-	if strings.TrimSpace(livePushToken) == "" {
-		livePushToken = os.Getenv("MOTION_LEVELS_PLATFORM_TOKEN")
-	}
-	flag.StringVar(&cfg.HTTPAddr, "http", "127.0.0.1:4101", "HTTP address for websocket preview")
+	flag.StringVar(&cfg.HTTPAddr, "http", "127.0.0.1:4101", "HTTP address for minimal health and Prometheus endpoints")
 	flag.StringVar(&cfg.FrameAddr, "frames", "127.0.0.1:4201", "TCP address for length-prefixed protobuf frame stream")
 	flag.StringVar(&cfg.InputAddr, "input-events", "127.0.0.1:4202", "TCP address for pressure event subscribers; empty disables")
 	flag.StringVar(&cfg.DuplexAddr, "duplex", "127.0.0.1:4203", "TCP address for the protocol-v2 duplex floor stream; empty disables")
@@ -266,13 +152,7 @@ func parseConfig() config {
 	flag.StringVar(&cfg.FloorSourceIP, "floor-source-ip", os.Getenv("MOTION_LEVELS_FLOOR_SOURCE_IP"), "local IPv4 source address for floor UDP output; empty uses the default route")
 	flag.StringVar(&cfg.BroadcastIP, "broadcast-ip", "255.255.255.255", "UDP broadcast IP for LED packets")
 	flag.IntVar(&cfg.BroadcastPort, "broadcast-port", 4626, "UDP broadcast port for LED packets")
-	flag.StringVar(&cfg.ControllerID, "controller-id", "", "stable controller UUID override; normally leave empty and use controller-id-file")
-	flag.StringVar(&cfg.ControllerIDFile, "controller-id-file", controllerid.DefaultPath, "file used to persist this controller's generated UUID")
-	flag.StringVar(&cfg.LivePushPlatformURL, "live-push-platform-url", livePushPlatformURL, "platform base URL for outbound live floor preview frames; empty disables")
-	flag.StringVar(&cfg.LivePushToken, "live-push-token", livePushToken, "platform bearer token for live floor preview ingest; can also use MOTION_LEVELS_LIVE_PUSH_TOKEN or MOTION_LEVELS_PLATFORM_TOKEN")
-	flag.IntVar(&cfg.LivePushFPS, "live-push-fps", envInt("MOTION_LEVELS_LIVE_PUSH_FPS", 5), "maximum outbound live floor preview push rate; 0 disables")
-	flag.DurationVar(&cfg.LivePushTimeout, "live-push-timeout", envDuration("MOTION_LEVELS_LIVE_PUSH_TIMEOUT", 2*time.Second), "HTTP timeout for live floor preview pushes")
-	flag.IntVar(&cfg.RefreshFPS, "refresh-fps", 50, "floor-controller output refresh rate for UDP and websocket preview")
+	flag.IntVar(&cfg.RefreshFPS, "refresh-fps", 50, "floor-adapter physical UDP refresh rate")
 	flag.DurationVar(&cfg.EngineFadeDelay, "engine-fade-delay", 2*time.Second, "time to hold the last game frame after the game-engine disconnects before fading")
 	flag.DurationVar(&cfg.EngineFadeDuration, "engine-fade-duration", 3*time.Second, "duration of the fade to black after engine-fade-delay")
 	flag.Parse()
@@ -295,18 +175,6 @@ func (c config) validate() error {
 			errs = append(errs, fmt.Errorf("floor-source-ip must be a valid IPv4 address"))
 		}
 	}
-	if c.LivePushFPS < 0 {
-		errs = append(errs, fmt.Errorf("live-push-fps must be zero or greater"))
-	}
-	if c.LivePushTimeout <= 0 {
-		errs = append(errs, fmt.Errorf("live-push-timeout must be positive"))
-	}
-	if strings.TrimSpace(c.LivePushPlatformURL) != "" {
-		parsed, err := url.Parse(c.LivePushPlatformURL)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			errs = append(errs, fmt.Errorf("live-push-platform-url must be an absolute URL"))
-		}
-	}
 	if c.EngineFadeDelay < 0 {
 		errs = append(errs, fmt.Errorf("engine-fade-delay must be non-negative"))
 	}
@@ -323,12 +191,6 @@ func (c config) validate() error {
 }
 
 func run(ctx context.Context, cfg config) error {
-	resolvedControllerID, err := controllerid.Resolve(cfg.ControllerIDFile, cfg.ControllerID)
-	if err != nil {
-		return err
-	}
-	cfg.ControllerID = resolvedControllerID
-
 	conn, err := openUDP(cfg.RecvPort)
 	if err != nil {
 		return err
@@ -343,29 +205,17 @@ func run(ctx context.Context, cfg config) error {
 	metrics := newControllerMetrics()
 	pressureStreams := &pressureStreamHub{clients: make(map[*pressureStreamClient]bool)}
 	duplex := newDuplexHub(cfg)
-	hub := &websocketHub{
-		clients:         make(map[*websocket.Conn]*websocketClient),
-		config:          cfg.configMessage(),
-		pressureStreams: pressureStreams,
-		duplex:          duplex,
-	}
 	state := &controllerState{sensorState: make(map[sensorKey]bool)}
 	frames := &latestFrameBuffer{}
-	livePusher := newLiveFramePusher(cfg)
-	if livePusher != nil {
-		go livePusher.run(ctx)
-		log.Printf("live floor push: %s at up to %d fps", livePusher.endpoint, cfg.LivePushFPS)
-	}
-	log.Printf("controller id: %s", cfg.ControllerID)
 	log.Printf("config: %s", cfg)
 
 	go metricsLoop(ctx, metrics)
-	go statusLoop(ctx, cfg, hub, metrics, duplex)
-	go readUDP(ctx, conn, state, hub, pressureStreams, duplex)
-	go serveHTTP(ctx, cfg, hub, state, metrics)
+	go statusLoop(ctx, cfg, metrics, duplex)
+	go readUDP(ctx, conn, state, pressureStreams, duplex)
+	go serveHTTP(ctx, cfg, metrics)
 	go listenPressureSubscribers(ctx, cfg.InputAddr, pressureStreams)
 	go syncLoop(ctx, sender, broadcastAddr, metrics)
-	go presentationLoop(ctx, cfg, sender, broadcastAddr, hub, state, frames, metrics, livePusher, duplex)
+	go presentationLoop(ctx, cfg, sender, broadcastAddr, state, frames, metrics, duplex)
 	onFrame := func(record *recordingpb.FrameRecord, receivedAt time.Time) {
 		metrics.markGameFrame(record, receivedAt)
 		frames.update(record)
@@ -457,7 +307,7 @@ func (s *udpSender) WriteToUDP(packet []byte, addr *net.UDPAddr) (int, error) {
 	return s.packet.WriteTo(packet, s.control, addr)
 }
 
-func readUDP(ctx context.Context, conn *net.UDPConn, state *controllerState, hub *websocketHub, pressureStreams *pressureStreamHub, duplex *duplexHub) {
+func readUDP(ctx context.Context, conn *net.UDPConn, state *controllerState, pressureStreams *pressureStreamHub, duplex *duplexHub) {
 	buffer := make([]byte, 64*1024)
 	for {
 		select {
@@ -479,7 +329,6 @@ func readUDP(ctx context.Context, conn *net.UDPConn, state *controllerState, hub
 			log.Printf("tile handshake from %s (%d bytes)", addr, n)
 		case 0x88:
 			for _, event := range state.applySensorPacket(packet) {
-				hub.broadcastPressure(event)
 				pressureStreams.broadcast(event)
 				duplex.broadcastPressure(event)
 			}
@@ -521,25 +370,8 @@ func listenPressureSubscribers(ctx context.Context, addr string, hub *pressureSt
 	}
 }
 
-func newHTTPHandler(cfg config, hub *websocketHub, state *controllerState, metrics *controllerMetrics) http.Handler {
-	sub, err := fs.Sub(webFS, "web")
-	if err != nil {
-		log.Fatal(err)
-	}
-	index, err := fs.ReadFile(sub, "index.html")
-	if err != nil {
-		log.Fatal(err)
-	}
-
+func newHTTPHandler(cfg config, metrics *controllerMetrics) http.Handler {
 	mux := http.NewServeMux()
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		hub.add(conn, state)
-	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -555,31 +387,16 @@ func newHTTPHandler(cfg config, hub *websocketHub, state *controllerState, metri
 			log.Printf("health response: %v", err)
 		}
 	})
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		if err := json.NewEncoder(w).Encode(snapshotStatus(metrics, cfg, hub)); err != nil {
-			log.Printf("status response: %v", err)
-		}
-	})
-	mux.HandleFunc("/metrics", controllerMetricsHandler(cfg, hub, metrics))
+	mux.HandleFunc("/metrics", controllerMetricsHandler(cfg, metrics))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Write(index)
+		http.NotFound(w, r)
 	})
 	return mux
 }
 
-func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *controllerState, metrics *controllerMetrics) {
-	for _, url := range previewURLs(cfg.HTTPAddr, "/") {
-		log.Printf("preview: %s", url)
-	}
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: newHTTPHandler(cfg, hub, state, metrics)}
+func serveHTTP(ctx context.Context, cfg config, metrics *controllerMetrics) {
+	log.Printf("health and metrics: %s", cfg.HTTPAddr)
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: newHTTPHandler(cfg, metrics)}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -679,7 +496,7 @@ func (g *gameEngineStreamGate) release() {
 	g.active = false
 }
 
-func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *net.UDPAddr, hub *websocketHub, state *controllerState, frames *latestFrameBuffer, metrics *controllerMetrics, livePusher *liveFramePusher, duplex *duplexHub) {
+func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *net.UDPAddr, state *controllerState, frames *latestFrameBuffer, metrics *controllerMetrics, duplex *duplexHub) {
 	log.Printf("presentation refresh: %d fps", cfg.RefreshFPS)
 	ticker := time.NewTicker(time.Second / time.Duration(cfg.RefreshFPS))
 	defer ticker.Stop()
@@ -702,112 +519,9 @@ func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *
 			}
 			sendFrame(sender, addr, tiles, metrics)
 			metrics.markPresented(sequence, now, frame)
-			viewerFrame := buildViewerFrame(sequence, frame.Width, frame.Height, tiles)
-			hub.broadcastBinary(viewerFrame)
 			duplex.broadcastPresented(sequence, frame.Sequence, now, frame.Width, frame.Height, tiles, fade)
-			// During the compatibility window the controller keeps publishing
-			// for v1 engines. A v2 engine receives the observed frame and owns
-			// the only platform publication, avoiding duplicate writers.
-			if livePusher != nil && !duplex.active() && livePusher.shouldEnqueue(now) {
-				livePusher.enqueue(liveFloorPushJob{
-					ControllerID:       cfg.ControllerID,
-					SessionID:          frame.SessionId,
-					Sequence:           sequence,
-					Width:              frame.Width,
-					Height:             frame.Height,
-					PresentedUnixNanos: now.UnixNano(),
-					FrameBase64:        base64.StdEncoding.EncodeToString(viewerFrame),
-				})
-			}
 		}
 	}
-}
-
-func (p *liveFramePusher) shouldEnqueue(now time.Time) bool {
-	if p == nil || now.Sub(p.lastEnqueued) < p.interval {
-		return false
-	}
-	p.lastEnqueued = now
-	return true
-}
-
-func newLiveFramePusher(cfg config) *liveFramePusher {
-	platformURL := strings.TrimSpace(cfg.LivePushPlatformURL)
-	if platformURL == "" || cfg.LivePushFPS == 0 {
-		return nil
-	}
-	return &liveFramePusher{
-		endpoint: strings.TrimRight(platformURL, "/") + "/api/live-floor/ingest",
-		token:    strings.TrimSpace(cfg.LivePushToken),
-		interval: time.Second / time.Duration(cfg.LivePushFPS),
-		client:   &http.Client{Timeout: cfg.LivePushTimeout},
-		jobs:     make(chan liveFloorPushJob, 1),
-	}
-}
-
-func (p *liveFramePusher) enqueue(job liveFloorPushJob) {
-	if p == nil {
-		return
-	}
-
-	select {
-	case p.jobs <- job:
-		return
-	default:
-	}
-
-	select {
-	case <-p.jobs:
-	default:
-	}
-
-	select {
-	case p.jobs <- job:
-	default:
-	}
-}
-
-func (p *liveFramePusher) run(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case job := <-p.jobs:
-			if err := p.post(ctx, job); err != nil {
-				now := time.Now()
-				if now.Sub(p.lastErrorLog) >= 10*time.Second {
-					log.Printf("live floor push: %v", err)
-					p.lastErrorLog = now
-				}
-			}
-		}
-	}
-}
-
-func (p *liveFramePusher) post(ctx context.Context, job liveFloorPushJob) error {
-	body, err := json.Marshal(job)
-	if err != nil {
-		return err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	if p.token != "" {
-		request.Header.Set("Authorization", "Bearer "+p.token)
-	}
-
-	response, err := p.client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, response.Body)
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("platform returned %s", response.Status)
-	}
-	return nil
 }
 
 func newControllerMetrics() *controllerMetrics {
@@ -828,7 +542,7 @@ func metricsLoop(ctx context.Context, metrics *controllerMetrics) {
 	}
 }
 
-func statusLoop(ctx context.Context, cfg config, hub *websocketHub, metrics *controllerMetrics, duplex *duplexHub) {
+func statusLoop(ctx context.Context, cfg config, metrics *controllerMetrics, duplex *duplexHub) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -836,32 +550,27 @@ func statusLoop(ctx context.Context, cfg config, hub *websocketHub, metrics *con
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			status := snapshotStatus(metrics, cfg, hub)
-			hub.broadcastJSON(status)
-			duplex.broadcastStatus(status)
+			duplex.broadcastStatus(snapshotStatus(metrics, cfg))
 		}
 	}
 }
 
-func snapshotStatus(metrics *controllerMetrics, cfg config, hub *websocketHub) statusMessage {
+func snapshotStatus(metrics *controllerMetrics, cfg config) statusMessage {
 	now := time.Now()
 	gameFrameAgeMS := int64(-1)
 	if received := metrics.lastGameFrameReceived.Load(); received > 0 {
 		gameFrameAgeMS = now.Sub(time.Unix(0, received)).Milliseconds()
 	}
 	return statusMessage{
-		Type:              "status",
 		UptimeSeconds:     int64(now.Sub(metrics.startedAt).Seconds()),
 		PresentedFrames:   metrics.presentedFrames.Load(),
 		ActualFPS:         math.Float64frombits(metrics.actualFPSBits.Load()),
 		RefreshFPS:        cfg.RefreshFPS,
-		WebsocketClients:  hub.clientCount(),
 		UDPErrorCount:     metrics.udpSendErrors.Load(),
 		GameFrameAgeMS:    gameFrameAgeMS,
 		GameFrameSequence: metrics.lastGameFrameSequence.Load(),
 		GameEngineOnline:  metrics.gameEngineOnline(),
 		EngineFadeAmount:  metrics.engineFadeAmount(now, cfg.EngineFadeDelay, cfg.EngineFadeDuration),
-		ControllerID:      cfg.ControllerID,
 		Sync:              metrics.syncStatus(),
 	}
 }
@@ -1083,38 +792,6 @@ func fadeTiles(tiles []floor.Tile, scale float64) []floor.Tile {
 	return faded
 }
 
-func buildViewerFrame(sequence uint64, width, height uint32, tiles []floor.Tile) []byte {
-	const headerLen = 16
-	tileCount := int(width * height)
-	rgbOffset := headerLen
-	pressureOffset := rgbOffset + tileCount*3
-	data := make([]byte, pressureOffset+(tileCount+7)/8)
-
-	copy(data[0:4], []byte{'M', 'L', 'F', '1'})
-	binary.LittleEndian.PutUint32(data[4:8], uint32(sequence))
-	binary.LittleEndian.PutUint16(data[8:10], uint16(width))
-	binary.LittleEndian.PutUint16(data[10:12], uint16(height))
-	data[12] = 1
-	data[13] = 0
-	binary.LittleEndian.PutUint16(data[14:16], headerLen)
-
-	for _, tile := range tiles {
-		if tile.X < 0 || tile.Y < 0 || tile.X >= int(width) || tile.Y >= int(height) {
-			continue
-		}
-		index := tile.Y*int(width) + tile.X
-		rgbIndex := rgbOffset + index*3
-		data[rgbIndex] = tile.R
-		data[rgbIndex+1] = tile.G
-		data[rgbIndex+2] = tile.B
-		if tile.Pressed {
-			data[pressureOffset+index/8] |= 1 << uint(index%8)
-		}
-	}
-
-	return data
-}
-
 func (b *latestFrameBuffer) update(frame *recordingpb.FrameRecord) {
 	if frame == nil {
 		return
@@ -1132,191 +809,6 @@ func (b *latestFrameBuffer) snapshot() (*recordingpb.FrameRecord, bool) {
 		return nil, false
 	}
 	return proto.Clone(b.frame).(*recordingpb.FrameRecord), true
-}
-
-func (c config) configMessage() configMessage {
-	return configMessage{
-		Type:          "config",
-		RefreshFPS:    c.RefreshFPS,
-		GridWidth:     floor.GridWidth,
-		GridHeight:    floor.GridHeight,
-		FrameAddr:     c.FrameAddr,
-		InputAddr:     c.InputAddr,
-		RecvPort:      c.RecvPort,
-		BroadcastAddr: fmt.Sprintf("%s:%d", c.BroadcastIP, c.BroadcastPort),
-		FloorSourceIP: c.FloorSourceIP,
-		ControllerID:  c.ControllerID,
-	}
-}
-
-func previewURLs(addr, path string) []string {
-	port := portFromAddr(addr)
-	urls := []string{"http://127.0.0.1" + port + path}
-	for _, ip := range localIPv4s() {
-		urls = append(urls, "http://"+ip+port+path)
-	}
-	return urls
-}
-
-func portFromAddr(addr string) string {
-	_, port, err := net.SplitHostPort(addr)
-	if err == nil && port != "" {
-		return ":" + port
-	}
-	if len(addr) > 0 && addr[0] == ':' {
-		return addr
-	}
-	return ""
-}
-
-func localIPv4s() []string {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, _ := iface.Addrs()
-		for _, addr := range addrs {
-			ipnet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			ip := ipnet.IP.To4()
-			if ip == nil || !ip.IsPrivate() {
-				continue
-			}
-			out = append(out, ip.String())
-		}
-	}
-	return out
-}
-
-func (h *websocketHub) add(conn *websocket.Conn, state *controllerState) {
-	log.Printf("websocket connected")
-	client := &websocketClient{conn: conn}
-	if err := client.writeJSON(h.config); err != nil {
-		_ = conn.Close()
-		return
-	}
-	h.mu.Lock()
-	h.clients[conn] = client
-	h.mu.Unlock()
-	go h.readClient(client, state)
-}
-
-func (h *websocketHub) clientCount() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.clients)
-}
-
-func (h *websocketHub) readClient(client *websocketClient, state *controllerState) {
-	defer func() {
-		h.removeClient(client)
-	}()
-
-	for {
-		var message inputMessage
-		if err := client.conn.ReadJSON(&message); err != nil {
-			return
-		}
-		if message.Type != "press" || !floor.InLogicalBounds(message.X, message.Y) {
-			continue
-		}
-		physical := floor.LogicalToPhysical(message.X, message.Y)
-		event := pressEvent{
-			Source:     "web",
-			Controller: physical.Controller,
-			Channel:    physical.Channel,
-			Position:   physical.Position,
-			X:          message.X,
-			Y:          message.Y,
-			Pressed:    message.Pressed,
-		}
-		if state.applyPress(event) {
-			h.broadcastPressure(event)
-			if h.pressureStreams != nil {
-				h.pressureStreams.broadcast(event)
-			}
-			if h.duplex != nil {
-				h.duplex.broadcastPressure(event)
-			}
-		}
-	}
-}
-
-func (h *websocketHub) broadcastPressure(event pressEvent) {
-	h.broadcastJSON(pressureMessage{
-		Type:    "pressure",
-		X:       event.X,
-		Y:       event.Y,
-		Pressed: event.Pressed,
-		Source:  event.Source,
-	})
-}
-
-func (h *websocketHub) broadcastJSON(message any) {
-	data, err := json.Marshal(message)
-	if err != nil {
-		return
-	}
-
-	h.broadcast(websocket.TextMessage, data)
-}
-
-func (h *websocketHub) broadcastBinary(data []byte) {
-	h.broadcast(websocket.BinaryMessage, data)
-}
-
-func (h *websocketHub) broadcast(messageType int, data []byte) {
-	for _, client := range h.snapshotClients() {
-		if err := client.writeMessage(messageType, data); err != nil {
-			h.removeClient(client)
-		}
-	}
-}
-
-func (h *websocketHub) snapshotClients() []*websocketClient {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	clients := make([]*websocketClient, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-	}
-	return clients
-}
-
-func (h *websocketHub) removeClient(client *websocketClient) {
-	if client == nil || client.conn == nil {
-		return
-	}
-	h.mu.Lock()
-	if h.clients[client.conn] == client {
-		delete(h.clients, client.conn)
-	}
-	h.mu.Unlock()
-	_ = client.conn.Close()
-}
-
-func (c *websocketClient) writeJSON(message any) error {
-	data, err := json.Marshal(message)
-	if err != nil {
-		return err
-	}
-	return c.writeMessage(websocket.TextMessage, data)
-}
-
-func (c *websocketClient) writeMessage(messageType int, data []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_ = c.conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
-	err := c.conn.WriteMessage(messageType, data)
-	_ = c.conn.SetWriteDeadline(time.Time{})
-	return err
 }
 
 func (h *pressureStreamHub) add(client *pressureStreamClient) {
@@ -1467,9 +959,5 @@ func (s *controllerState) snapshotPressed() [floor.GridHeight][floor.GridWidth]b
 }
 
 func (c config) String() string {
-	livePush := "off"
-	if strings.TrimSpace(c.LivePushPlatformURL) != "" && c.LivePushFPS > 0 {
-		livePush = fmt.Sprintf("%s@%dfps", c.LivePushPlatformURL, c.LivePushFPS)
-	}
-	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s duplex=%s refresh=%dfps udp=:%d floor-source-ip=%s broadcast=%s:%d live-push=%s fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.DuplexAddr, c.RefreshFPS, c.RecvPort, c.FloorSourceIP, c.BroadcastIP, c.BroadcastPort, livePush, c.EngineFadeDelay, c.EngineFadeDuration)
+	return fmt.Sprintf("http=%s frames=%s input-events=%s duplex=%s refresh=%dfps udp=:%d floor-source-ip=%s broadcast=%s:%d fade=%s+%s", c.HTTPAddr, c.FrameAddr, c.InputAddr, c.DuplexAddr, c.RefreshFPS, c.RecvPort, c.FloorSourceIP, c.BroadcastIP, c.BroadcastPort, c.EngineFadeDelay, c.EngineFadeDuration)
 }

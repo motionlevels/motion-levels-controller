@@ -30,7 +30,7 @@ func (p *prometheusWriter) metric(name, help, kind string, value any, labels ...
 	_, _ = fmt.Fprintf(&p.b, " %v\n", value)
 }
 
-func controllerMetricsHandler(cfg config, hub *websocketHub, metrics *controllerMetrics) http.HandlerFunc {
+func controllerMetricsHandler(cfg config, metrics *controllerMetrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -42,7 +42,7 @@ func controllerMetricsHandler(cfg config, hub *websocketHub, metrics *controller
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		status := snapshotStatus(metrics, cfg, hub)
+		status := snapshotStatus(metrics, cfg)
 		now := time.Now()
 		frameAge := float64(status.GameFrameAgeMS) / 1000
 		if status.GameFrameAgeMS < 0 {
@@ -64,7 +64,6 @@ func controllerMetricsHandler(cfg config, hub *websocketHub, metrics *controller
 		p.metric("motion_levels_controller_game_engine_connected", "Whether the game engine frame stream is connected.", "gauge", boolNumber(status.GameEngineOnline))
 		p.metric("motion_levels_controller_game_frame_age_seconds", "Age of the latest frame received from the game engine.", "gauge", frameAge)
 		p.metric("motion_levels_controller_engine_fade_ratio", "Current safety fade from live frame (0) to black (1).", "gauge", status.EngineFadeAmount)
-		p.metric("motion_levels_controller_websocket_clients", "Connected live floor preview clients.", "gauge", status.WebsocketClients)
 		p.metric("motion_levels_controller_udp_send_errors_total", "UDP floor output send errors.", "counter", status.UDPErrorCount)
 		p.metric("motion_levels_controller_sync_samples_total", "Frame clock synchronization samples.", "counter", status.Sync.Samples)
 		p.metric("motion_levels_controller_engine_clock_offset_seconds", "Observed engine to controller clock offset.", "gauge", status.Sync.EngineClockOffsetMS/1000)

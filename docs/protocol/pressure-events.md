@@ -2,9 +2,9 @@
 
 `floor-controller` keeps pressure state independently from rendered frames.
 
-The game engine receives live pressure changes as event messages. The controller
-also samples the current pressure state into each live viewer frame so the
-preview represents what was presented to the floor.
+The game engine receives live pressure changes as event messages. The adapter
+also samples current pressure into each protocol-v2 presented frame so the
+engine-owned live view represents what was physically presented.
 
 The protobuf contract is:
 

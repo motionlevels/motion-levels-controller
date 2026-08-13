@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"math"
 	"net"
 	"net/http"
@@ -10,19 +9,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/motionlevels/motion-levels-controller/contracts/recordingpb"
 	"github.com/motionlevels/motion-levels-controller/internal/floor"
 )
 
-func TestHTTPHandlerDoesNotExposeHostKioskControl(t *testing.T) {
-	handler := newHTTPHandler(config{}, nil, nil, nil)
+func TestHTTPHandlerExposesOnlyHealthAndMetrics(t *testing.T) {
+	handler := newHTTPHandler(config{RefreshFPS: 50}, newControllerMetrics())
 	for _, testCase := range []struct {
 		method string
 		path   string
 	}{
 		{method: http.MethodGet, path: "/tv"},
 		{method: http.MethodPost, path: "/tv/refresh"},
+		{method: http.MethodGet, path: "/"},
+		{method: http.MethodGet, path: "/status"},
+		{method: http.MethodGet, path: "/ws"},
 	} {
 		t.Run(testCase.method+" "+testCase.path, func(t *testing.T) {
 			request := httptest.NewRequest(testCase.method, testCase.path, nil)
@@ -35,37 +36,24 @@ func TestHTTPHandlerDoesNotExposeHostKioskControl(t *testing.T) {
 	}
 }
 
-func TestWebAndUDPPushSamePressureState(t *testing.T) {
+func TestPhysicalPressureStateFollowsSensorPackets(t *testing.T) {
 	state := &controllerState{sensorState: make(map[sensorKey]bool)}
 	x, y := 4, 9
 
 	physical := floor.LogicalToPhysical(x, y)
-	state.applyPress(pressEvent{
-		Source:     "web",
-		Controller: physical.Controller,
-		Channel:    physical.Channel,
-		Position:   physical.Position,
-		X:          x,
-		Y:          y,
-		Pressed:    true,
-	})
-	if !state.snapshotPressed()[y][x] {
-		t.Fatal("web press did not mark tile pressed")
-	}
-
 	packet := make([]byte, 3+floor.DefaultChannels*171)
 	packet[0] = 0x88
 	packet[1] = byte(physical.Controller)
-	packet[3+physical.Channel*171+physical.Position] = 0x00
-	state.applySensorPacket(packet)
-	if state.snapshotPressed()[y][x] {
-		t.Fatal("udp release did not clear web-pressed tile")
-	}
-
 	packet[3+physical.Channel*171+physical.Position] = 0xCC
 	state.applySensorPacket(packet)
 	if !state.snapshotPressed()[y][x] {
 		t.Fatal("udp press did not mark tile pressed")
+	}
+
+	packet[3+physical.Channel*171+physical.Position] = 0x00
+	state.applySensorPacket(packet)
+	if state.snapshotPressed()[y][x] {
+		t.Fatal("udp release did not clear tile")
 	}
 }
 
@@ -108,8 +96,7 @@ func TestLatestFrameBufferCopiesIncomingFrame(t *testing.T) {
 
 func TestSnapshotStatusIncludesConfiguredRefreshFPS(t *testing.T) {
 	metrics := &controllerMetrics{startedAt: time.Now()}
-	hub := &websocketHub{clients: make(map[*websocket.Conn]*websocketClient)}
-	status := snapshotStatus(metrics, config{RefreshFPS: 50}, hub)
+	status := snapshotStatus(metrics, config{RefreshFPS: 50})
 	if status.RefreshFPS != 50 {
 		t.Fatalf("refresh fps = %d, want 50", status.RefreshFPS)
 	}
@@ -119,8 +106,7 @@ func TestMetricsEndpointExportsBoundedControllerHealth(t *testing.T) {
 	metrics := newControllerMetrics()
 	metrics.markGameEngineConnected()
 	metrics.actualFPSBits.Store(math.Float64bits(49.8))
-	hub := &websocketHub{clients: make(map[*websocket.Conn]*websocketClient)}
-	handler := newHTTPHandler(config{RefreshFPS: 50}, hub, &controllerState{}, metrics)
+	handler := newHTTPHandler(config{RefreshFPS: 50}, metrics)
 	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	response := httptest.NewRecorder()
 
@@ -144,28 +130,6 @@ func TestMetricsEndpointExportsBoundedControllerHealth(t *testing.T) {
 	}
 }
 
-func TestSnapshotStatusDoesNotWaitForClientWriteLock(t *testing.T) {
-	metrics := &controllerMetrics{startedAt: time.Now()}
-	client := &websocketClient{}
-	client.mu.Lock()
-	defer client.mu.Unlock()
-	hub := &websocketHub{clients: map[*websocket.Conn]*websocketClient{nil: client}}
-
-	done := make(chan statusMessage, 1)
-	go func() {
-		done <- snapshotStatus(metrics, config{RefreshFPS: 50}, hub)
-	}()
-
-	select {
-	case status := <-done:
-		if status.WebsocketClients != 1 {
-			t.Fatalf("websocket clients = %d, want 1", status.WebsocketClients)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("snapshotStatus waited for a client write lock")
-	}
-}
-
 func TestGameEngineStreamGateAllowsOnlyOneActiveStream(t *testing.T) {
 	gate := &gameEngineStreamGate{}
 	if !gate.tryAcquire() {
@@ -177,36 +141,6 @@ func TestGameEngineStreamGateAllowsOnlyOneActiveStream(t *testing.T) {
 	gate.release()
 	if !gate.tryAcquire() {
 		t.Fatal("stream should be accepted after release")
-	}
-}
-
-func TestConfigMessageUsesControllerOwnedSettings(t *testing.T) {
-	message := config{
-		FrameAddr:     "127.0.0.1:4201",
-		RecvPort:      7800,
-		FloorSourceIP: "127.0.0.1",
-		BroadcastIP:   "127.0.0.1",
-		BroadcastPort: 4626,
-		RefreshFPS:    50,
-	}.configMessage()
-
-	if message.Type != "config" {
-		t.Fatalf("message type = %q, want config", message.Type)
-	}
-	if message.RefreshFPS != 50 {
-		t.Fatalf("refresh fps = %d, want 50", message.RefreshFPS)
-	}
-	if message.GridWidth != floor.GridWidth || message.GridHeight != floor.GridHeight {
-		t.Fatalf("grid = %dx%d, want %dx%d", message.GridWidth, message.GridHeight, floor.GridWidth, floor.GridHeight)
-	}
-	if message.BroadcastAddr != "127.0.0.1:4626" {
-		t.Fatalf("broadcast address = %q, want 127.0.0.1:4626", message.BroadcastAddr)
-	}
-	if message.FloorSourceIP != "127.0.0.1" {
-		t.Fatalf("floor source IP = %q, want 127.0.0.1", message.FloorSourceIP)
-	}
-	if message.InputAddr != "" {
-		t.Fatalf("input address = %q, want empty default from test config", message.InputAddr)
 	}
 }
 
@@ -266,50 +200,6 @@ func TestPressureProtoFromEventIncludesHardwareAndLogicalCoordinates(t *testing.
 	}
 }
 
-func TestBuildViewerFrameEncodesRGBAndPressureBitset(t *testing.T) {
-	data := buildViewerFrame(42, 4, 2, []floor.Tile{
-		{X: 1, Y: 0, R: 10, G: 20, B: 30, Pressed: true},
-		{X: 3, Y: 1, R: 40, G: 50, B: 60, Pressed: true},
-	})
-
-	if got := string(data[0:4]); got != "MLF1" {
-		t.Fatalf("magic = %q, want MLF1", got)
-	}
-	if got := binary.LittleEndian.Uint32(data[4:8]); got != 42 {
-		t.Fatalf("sequence = %d, want 42", got)
-	}
-	if got := binary.LittleEndian.Uint16(data[8:10]); got != 4 {
-		t.Fatalf("width = %d, want 4", got)
-	}
-	if got := binary.LittleEndian.Uint16(data[10:12]); got != 2 {
-		t.Fatalf("height = %d, want 2", got)
-	}
-	if data[12] != 1 {
-		t.Fatalf("flags = %d, want pressure flag", data[12])
-	}
-	headerLen := int(binary.LittleEndian.Uint16(data[14:16]))
-	if headerLen != 16 {
-		t.Fatalf("header length = %d, want 16", headerLen)
-	}
-
-	firstRGB := headerLen + 1*3
-	if data[firstRGB] != 10 || data[firstRGB+1] != 20 || data[firstRGB+2] != 30 {
-		t.Fatalf("first tile rgb = %d,%d,%d, want 10,20,30", data[firstRGB], data[firstRGB+1], data[firstRGB+2])
-	}
-	secondRGB := headerLen + 7*3
-	if data[secondRGB] != 40 || data[secondRGB+1] != 50 || data[secondRGB+2] != 60 {
-		t.Fatalf("second tile rgb = %d,%d,%d, want 40,50,60", data[secondRGB], data[secondRGB+1], data[secondRGB+2])
-	}
-
-	pressureOffset := headerLen + 4*2*3
-	if data[pressureOffset]&(1<<1) == 0 {
-		t.Fatal("missing pressure bit for tile index 1")
-	}
-	if data[pressureOffset]&(1<<7) == 0 {
-		t.Fatal("missing pressure bit for tile index 7")
-	}
-}
-
 func TestConfigValidationRejectsInvalidHardwareConfig(t *testing.T) {
 	cfg := config{
 		FrameAddr:       "127.0.0.1:4201",
@@ -342,12 +232,7 @@ func TestColorGridFromTilesSupportsConstantTimeLookup(t *testing.T) {
 func TestStatusSnapshotIncludesPresentationHealth(t *testing.T) {
 	metrics := newControllerMetrics()
 	metrics.markPresented(12, time.Now(), nil)
-	hub := &websocketHub{}
-
-	status := snapshotStatus(metrics, config{}, hub)
-	if status.Type != "status" {
-		t.Fatalf("status type = %q, want status", status.Type)
-	}
+	status := snapshotStatus(metrics, config{})
 	if status.PresentedFrames != 12 {
 		t.Fatalf("presented frames = %d, want 12", status.PresentedFrames)
 	}
