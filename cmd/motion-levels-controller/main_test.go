@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/binary"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,6 +112,36 @@ func TestSnapshotStatusIncludesConfiguredRefreshFPS(t *testing.T) {
 	status := snapshotStatus(metrics, config{RefreshFPS: 50}, hub, nil)
 	if status.RefreshFPS != 50 {
 		t.Fatalf("refresh fps = %d, want 50", status.RefreshFPS)
+	}
+}
+
+func TestMetricsEndpointExportsBoundedControllerHealth(t *testing.T) {
+	metrics := newControllerMetrics()
+	metrics.markGameEngineConnected()
+	metrics.actualFPSBits.Store(math.Float64bits(49.8))
+	hub := &websocketHub{clients: make(map[*websocket.Conn]*websocketClient)}
+	handler := newHTTPHandler(config{RefreshFPS: 50}, hub, &controllerState{}, metrics, nil)
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		"motion_levels_controller_up 1",
+		"motion_levels_controller_actual_fps 49.8",
+		"motion_levels_controller_game_engine_connected 1",
+		"motion_levels_controller_recording_enabled 0",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("metrics missing %q:\n%s", expected, body)
+		}
+	}
+	if strings.Contains(body, "session_id") || strings.Contains(body, "controller_id") {
+		t.Fatalf("metrics contain an unbounded identity label:\n%s", body)
 	}
 }
 

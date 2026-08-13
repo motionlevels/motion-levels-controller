@@ -1,0 +1,96 @@
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/motionlevels/motion-levels-controller/internal/recording"
+)
+
+var buildRevision = "unknown"
+
+type prometheusWriter struct {
+	b strings.Builder
+}
+
+func (p *prometheusWriter) metric(name, help, kind string, value any, labels ...string) {
+	_, _ = fmt.Fprintf(&p.b, "# HELP %s %s\n# TYPE %s %s\n%s", name, help, name, kind, name)
+	if len(labels) > 0 {
+		p.b.WriteByte('{')
+		for index := 0; index+1 < len(labels); index += 2 {
+			if index > 0 {
+				p.b.WriteByte(',')
+			}
+			_, _ = fmt.Fprintf(&p.b, "%s=%s", labels[index], strconv.Quote(labels[index+1]))
+		}
+		p.b.WriteByte('}')
+	}
+	_, _ = fmt.Fprintf(&p.b, " %v\n", value)
+}
+
+func controllerMetricsHandler(cfg config, hub *websocketHub, metrics *controllerMetrics, recorder *recording.FrameRecorder) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		status := snapshotStatus(metrics, cfg, hub, recorder)
+		recordingStats := status.Recording
+		now := time.Now()
+		frameAge := float64(status.GameFrameAgeMS) / 1000
+		if status.GameFrameAgeMS < 0 {
+			frameAge = 0
+		}
+		var memory runtime.MemStats
+		runtime.ReadMemStats(&memory)
+
+		var p prometheusWriter
+		p.metric("motion_levels_controller_up", "Whether the floor controller process can serve metrics.", "gauge", 1)
+		p.metric("motion_levels_controller_build_info", "Floor controller build information.", "gauge", 1, "revision", buildRevision)
+		p.metric("motion_levels_controller_process_start_time_seconds", "Floor controller process start time since Unix epoch.", "gauge", metrics.startedAt.Unix())
+		p.metric("motion_levels_controller_go_memory_bytes", "Memory reserved by the Go runtime.", "gauge", memory.Sys)
+		p.metric("motion_levels_controller_process_goroutines", "Current number of goroutines.", "gauge", runtime.NumGoroutine())
+		p.metric("motion_levels_controller_uptime_seconds", "Floor controller process uptime.", "gauge", now.Sub(metrics.startedAt).Seconds())
+		p.metric("motion_levels_controller_presented_frames_total", "Frames presented to the physical floor.", "counter", status.PresentedFrames)
+		p.metric("motion_levels_controller_actual_fps", "Measured physical floor presentation rate.", "gauge", status.ActualFPS)
+		p.metric("motion_levels_controller_configured_fps", "Configured physical floor presentation rate.", "gauge", status.RefreshFPS)
+		p.metric("motion_levels_controller_game_engine_connected", "Whether the game engine frame stream is connected.", "gauge", boolNumber(status.GameEngineOnline))
+		p.metric("motion_levels_controller_game_frame_age_seconds", "Age of the latest frame received from the game engine.", "gauge", frameAge)
+		p.metric("motion_levels_controller_engine_fade_ratio", "Current safety fade from live frame (0) to black (1).", "gauge", status.EngineFadeAmount)
+		p.metric("motion_levels_controller_websocket_clients", "Connected live floor preview clients.", "gauge", status.WebsocketClients)
+		p.metric("motion_levels_controller_udp_send_errors_total", "UDP floor output send errors.", "counter", status.UDPErrorCount)
+		p.metric("motion_levels_controller_sync_samples_total", "Frame clock synchronization samples.", "counter", status.Sync.Samples)
+		p.metric("motion_levels_controller_engine_clock_offset_seconds", "Observed engine to controller clock offset.", "gauge", status.Sync.EngineClockOffsetMS/1000)
+		p.metric("motion_levels_controller_present_latency_seconds", "Observed controller presentation latency.", "gauge", status.Sync.PresentLatencyMS/1000)
+		p.metric("motion_levels_controller_sync_jitter_seconds", "Observed frame synchronization jitter.", "gauge", status.Sync.JitterMS/1000)
+		p.metric("motion_levels_controller_recording_enabled", "Whether floor frame recording is enabled.", "gauge", boolNumber(recordingStats.Path != ""))
+		p.metric("motion_levels_controller_recording_queue_depth", "Frames waiting in the recording queue.", "gauge", recordingStats.QueueDepth)
+		p.metric("motion_levels_controller_recording_queue_capacity", "Capacity of the recording queue.", "gauge", recordingStats.QueueCapacity)
+		p.metric("motion_levels_controller_recording_written_frames_total", "Frames written to recordings.", "counter", recordingStats.WrittenFrames)
+		p.metric("motion_levels_controller_recording_dropped_frames_total", "Frames dropped by the recording path.", "counter", recordingStats.DroppedFrames)
+		p.metric("motion_levels_controller_recording_pending_raw_bytes", "Raw recording bytes waiting for compression or cleanup.", "gauge", recordingStats.PendingRawBytes)
+		p.metric("motion_levels_controller_recording_error", "Whether recording currently reports an error.", "gauge", boolNumber(recordingStats.Error != "" || recordingStats.CompressionError != ""))
+		p.metric("motion_levels_controller_recording_upload_queue_depth", "Recording segments waiting for upload.", "gauge", recordingStats.Upload.QueueDepth)
+		p.metric("motion_levels_controller_recording_uploaded_segments_total", "Recording segments uploaded successfully.", "counter", recordingStats.Upload.UploadedSegments)
+		p.metric("motion_levels_controller_recording_failed_uploads_total", "Recording segment upload attempts that failed.", "counter", recordingStats.Upload.FailedSegments)
+		p.metric("motion_levels_controller_recording_dropped_uploads_total", "Recording segments dropped before upload.", "counter", recordingStats.Upload.DroppedSegments)
+		_, _ = w.Write([]byte(p.b.String()))
+	}
+}
+
+func boolNumber(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}

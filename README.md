@@ -201,6 +201,12 @@ The controller exposes live operational status as JSON:
 http://127.0.0.1:4101/status
 ```
 
+Prometheus metrics for the same bounded operational signals are available at
+`http://127.0.0.1:4101/metrics`. The endpoint includes presentation rate and
+latency, engine connectivity/frame freshness, UDP errors, clock sync, preview
+clients, recorder queues/drops/uploads, and Go process health. It never uses
+controller, session, player, or recording identifiers as metric labels.
+
 Status includes presented frame count, measured FPS, latest game-frame age,
 game-engine connection/fade state, websocket client count, UDP send errors, and
 controller ID, recording compression, post-compression, current segment

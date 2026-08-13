@@ -622,6 +622,7 @@ func newHTTPHandler(cfg config, hub *websocketHub, state *controllerState, metri
 			log.Printf("status response: %v", err)
 		}
 	})
+	mux.HandleFunc("/metrics", controllerMetricsHandler(cfg, hub, metrics, recorder))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)

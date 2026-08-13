@@ -3,6 +3,7 @@ ARG GO_IMAGE=golang:1.24-bookworm
 FROM ${GO_IMAGE} AS build
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG BUILD_REVISION=unknown
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -11,7 +12,7 @@ COPY contracts ./contracts
 COPY internal ./internal
 RUN go test ./... \
     && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
-      -trimpath -ldflags="-s -w" \
+      -trimpath -ldflags="-s -w -X main.buildRevision=${BUILD_REVISION}" \
       -o /out/motion-levels-controller ./cmd/motion-levels-controller
 
 FROM debian:bookworm-slim AS runtime
