@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/motionlevels/motion-levels-controller/contracts/floorpb"
 	"github.com/motionlevels/motion-levels-controller/contracts/inputpb"
 	"github.com/motionlevels/motion-levels-controller/contracts/recordingpb"
 	"google.golang.org/protobuf/proto"
@@ -61,5 +62,22 @@ func TestProtocolV1GoldenWirePayloads(t *testing.T) {
 				t.Fatalf("protocol v1 payload changed: got %s", got)
 			}
 		})
+	}
+}
+
+func TestProtocolV2GoldenWirePayload(t *testing.T) {
+	message := &floorpb.Envelope{Payload: &floorpb.Envelope_DesiredFrame{
+		DesiredFrame: &floorpb.DesiredFrame{
+			Sequence: 9, UnixNanos: 1_700, Width: 16, Height: 32,
+			Rgb: []byte{1, 2, 3, 4, 5, 6},
+		},
+	}}
+	payload, err := proto.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantHex = "1a11080910a40d181020202a06010203040506"
+	if got := hex.EncodeToString(payload); got != wantHex {
+		t.Fatalf("protocol v2 payload changed: got %s", got)
 	}
 }

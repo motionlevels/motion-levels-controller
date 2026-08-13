@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent motionlevels
 ARG BUILD_REVISION=unknown
 ARG BUILD_CREATED_AT=
-ARG CONTROLLER_PROTOCOL_VERSION=v1
+ARG CONTROLLER_PROTOCOL_VERSION=v1+v2
 LABEL org.opencontainers.image.title="Motion Levels Controller"
 LABEL org.opencontainers.image.source="https://github.com/motionlevels/motion-levels-controller"
 LABEL org.opencontainers.image.revision="${BUILD_REVISION}"

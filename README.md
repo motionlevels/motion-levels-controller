@@ -5,11 +5,11 @@ This repository owns the floor controller source and the immutable
 venue repository promotes an exact controller revision into an atomic venue
 release; this repository never deploys itself or runs an automatic updater.
 
-The engine/controller protobuf streams and the browser `MLF1` format are
-protocol `v1`. Their schemas live under `contracts/` so changes are explicit
-and reviewable. The controller uses host networking for UDP floor broadcast,
-but the production container is non-root, read-only, capability-free, and has
-no device mappings.
+The controller supports the legacy pair of protocol-v1 protobuf streams and
+the protocol-v2 duplex stream during migration. The browser preview remains
+`MLF1`. Schemas live under `contracts/` so changes are explicit and reviewable.
+The controller uses host networking for UDP floor broadcast, but the production
+container is non-root, read-only, capability-free, and has no device mappings.
 
 The floor controller is the local hardware-facing service.
 
@@ -59,6 +59,7 @@ The defaults are:
 - HTTP preview: `127.0.0.1:4101`
 - frame stream TCP listener: `127.0.0.1:4201`
 - pressure event stream: `127.0.0.1:4202`
+- protocol-v2 duplex stream: `127.0.0.1:4203`
 - UDP receive socket: `:7800`
 - LED broadcast: `255.255.255.255:4626`
 - controller ID file: `.motion-levels-controller-id`
@@ -142,3 +143,17 @@ keeps the preview lightweight without adding protobuf tooling to the browser.
 
 See `docs/protocol/live-viewer.md` and `docs/protocol/pressure-events.md` for
 the protocol details.
+
+## Floor Protocol v2
+
+The preferred engine connection is one length-prefixed protobuf stream at
+`127.0.0.1:4203`. Both peers first exchange a versioned hello. The engine then
+sends packed RGB `DesiredFrame` messages; the adapter returns physical
+`PressureEvent`, post-watchdog `PresentedFrame`, and bounded `AdapterStatus`
+messages on the same connection.
+
+`PresentedFrame` contains the RGB and pressure bits actually sent to the floor,
+including safety fade. The engine can therefore publish the existing observed
+live-floor view without giving the adapter platform identity or credentials.
+Protocol v2 deliberately contains no game, player, run, session, or platform
+fields. The v1 listeners remain available only for a compatibility window.

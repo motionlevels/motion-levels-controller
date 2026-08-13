@@ -43,6 +43,7 @@ type config struct {
 	HTTPAddr            string
 	FrameAddr           string
 	InputAddr           string
+	DuplexAddr          string
 	RecvPort            int
 	FloorSourceIP       string
 	BroadcastIP         string
@@ -63,6 +64,7 @@ type websocketHub struct {
 	clients         map[*websocket.Conn]*websocketClient
 	config          configMessage
 	pressureStreams *pressureStreamHub
+	duplex          *duplexHub
 }
 
 type websocketClient struct {
@@ -259,6 +261,7 @@ func parseConfig() config {
 	flag.StringVar(&cfg.HTTPAddr, "http", "127.0.0.1:4101", "HTTP address for websocket preview")
 	flag.StringVar(&cfg.FrameAddr, "frames", "127.0.0.1:4201", "TCP address for length-prefixed protobuf frame stream")
 	flag.StringVar(&cfg.InputAddr, "input-events", "127.0.0.1:4202", "TCP address for pressure event subscribers; empty disables")
+	flag.StringVar(&cfg.DuplexAddr, "duplex", "127.0.0.1:4203", "TCP address for the protocol-v2 duplex floor stream; empty disables")
 	flag.IntVar(&cfg.RecvPort, "recv-port", 7800, "UDP port for tile handshake/sensor packets")
 	flag.StringVar(&cfg.FloorSourceIP, "floor-source-ip", os.Getenv("MOTION_LEVELS_FLOOR_SOURCE_IP"), "local IPv4 source address for floor UDP output; empty uses the default route")
 	flag.StringVar(&cfg.BroadcastIP, "broadcast-ip", "255.255.255.255", "UDP broadcast IP for LED packets")
@@ -339,7 +342,13 @@ func run(ctx context.Context, cfg config) error {
 	broadcastAddr := &net.UDPAddr{IP: net.ParseIP(cfg.BroadcastIP), Port: cfg.BroadcastPort}
 	metrics := newControllerMetrics()
 	pressureStreams := &pressureStreamHub{clients: make(map[*pressureStreamClient]bool)}
-	hub := &websocketHub{clients: make(map[*websocket.Conn]*websocketClient), config: cfg.configMessage(), pressureStreams: pressureStreams}
+	duplex := newDuplexHub(cfg)
+	hub := &websocketHub{
+		clients:         make(map[*websocket.Conn]*websocketClient),
+		config:          cfg.configMessage(),
+		pressureStreams: pressureStreams,
+		duplex:          duplex,
+	}
 	state := &controllerState{sensorState: make(map[sensorKey]bool)}
 	frames := &latestFrameBuffer{}
 	livePusher := newLiveFramePusher(cfg)
@@ -351,16 +360,25 @@ func run(ctx context.Context, cfg config) error {
 	log.Printf("config: %s", cfg)
 
 	go metricsLoop(ctx, metrics)
-	go statusLoop(ctx, cfg, hub, metrics)
-	go readUDP(ctx, conn, state, hub, pressureStreams)
+	go statusLoop(ctx, cfg, hub, metrics, duplex)
+	go readUDP(ctx, conn, state, hub, pressureStreams, duplex)
 	go serveHTTP(ctx, cfg, hub, state, metrics)
 	go listenPressureSubscribers(ctx, cfg.InputAddr, pressureStreams)
 	go syncLoop(ctx, sender, broadcastAddr, metrics)
-	go presentationLoop(ctx, cfg, sender, broadcastAddr, hub, state, frames, metrics, livePusher)
-	return listenFrameStream(ctx, cfg.FrameAddr, func(record *recordingpb.FrameRecord, receivedAt time.Time) {
+	go presentationLoop(ctx, cfg, sender, broadcastAddr, hub, state, frames, metrics, livePusher, duplex)
+	onFrame := func(record *recordingpb.FrameRecord, receivedAt time.Time) {
 		metrics.markGameFrame(record, receivedAt)
 		frames.update(record)
-	}, metrics.markGameEngineConnected, metrics.markGameEngineDisconnected)
+	}
+	gate := &gameEngineStreamGate{}
+	errors := make(chan error, 2)
+	go func() {
+		errors <- listenFrameStream(ctx, cfg.FrameAddr, gate, onFrame, metrics.markGameEngineConnected, metrics.markGameEngineDisconnected)
+	}()
+	go func() {
+		errors <- listenDuplexStream(ctx, cfg.DuplexAddr, gate, duplex, onFrame, metrics.markGameEngineConnected, metrics.markGameEngineDisconnected)
+	}()
+	return <-errors
 }
 
 func openUDP(port int) (*net.UDPConn, error) {
@@ -439,7 +457,7 @@ func (s *udpSender) WriteToUDP(packet []byte, addr *net.UDPAddr) (int, error) {
 	return s.packet.WriteTo(packet, s.control, addr)
 }
 
-func readUDP(ctx context.Context, conn *net.UDPConn, state *controllerState, hub *websocketHub, pressureStreams *pressureStreamHub) {
+func readUDP(ctx context.Context, conn *net.UDPConn, state *controllerState, hub *websocketHub, pressureStreams *pressureStreamHub, duplex *duplexHub) {
 	buffer := make([]byte, 64*1024)
 	for {
 		select {
@@ -463,6 +481,7 @@ func readUDP(ctx context.Context, conn *net.UDPConn, state *controllerState, hub
 			for _, event := range state.applySensorPacket(packet) {
 				hub.broadcastPressure(event)
 				pressureStreams.broadcast(event)
+				duplex.broadcastPressure(event)
 			}
 		default:
 			log.Printf("unknown UDP packet 0x%02x from %s (%d bytes)", packet[0], addr, n)
@@ -574,7 +593,11 @@ func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *contro
 	}
 }
 
-func listenFrameStream(ctx context.Context, addr string, onFrame func(*recordingpb.FrameRecord, time.Time), onConnect, onDisconnect func()) error {
+func listenFrameStream(ctx context.Context, addr string, gate *gameEngineStreamGate, onFrame func(*recordingpb.FrameRecord, time.Time), onConnect, onDisconnect func()) error {
+	if strings.TrimSpace(addr) == "" {
+		<-ctx.Done()
+		return context.Canceled
+	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -586,7 +609,6 @@ func listenFrameStream(ctx context.Context, addr string, onFrame func(*recording
 		_ = listener.Close()
 	}()
 
-	gate := &gameEngineStreamGate{}
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -657,7 +679,7 @@ func (g *gameEngineStreamGate) release() {
 	g.active = false
 }
 
-func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *net.UDPAddr, hub *websocketHub, state *controllerState, frames *latestFrameBuffer, metrics *controllerMetrics, livePusher *liveFramePusher) {
+func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *net.UDPAddr, hub *websocketHub, state *controllerState, frames *latestFrameBuffer, metrics *controllerMetrics, livePusher *liveFramePusher, duplex *duplexHub) {
 	log.Printf("presentation refresh: %d fps", cfg.RefreshFPS)
 	ticker := time.NewTicker(time.Second / time.Duration(cfg.RefreshFPS))
 	defer ticker.Stop()
@@ -674,14 +696,19 @@ func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *
 			}
 			sequence++
 			tiles := tilesFromFrame(frame, state.snapshotPressed())
-			if fade := metrics.engineFadeAmount(now, cfg.EngineFadeDelay, cfg.EngineFadeDuration); fade > 0 {
+			fade := metrics.engineFadeAmount(now, cfg.EngineFadeDelay, cfg.EngineFadeDuration)
+			if fade > 0 {
 				tiles = fadeTiles(tiles, 1-fade)
 			}
 			sendFrame(sender, addr, tiles, metrics)
 			metrics.markPresented(sequence, now, frame)
 			viewerFrame := buildViewerFrame(sequence, frame.Width, frame.Height, tiles)
 			hub.broadcastBinary(viewerFrame)
-			if livePusher != nil && livePusher.shouldEnqueue(now) {
+			duplex.broadcastPresented(sequence, frame.Sequence, now, frame.Width, frame.Height, tiles, fade)
+			// During the compatibility window the controller keeps publishing
+			// for v1 engines. A v2 engine receives the observed frame and owns
+			// the only platform publication, avoiding duplicate writers.
+			if livePusher != nil && !duplex.active() && livePusher.shouldEnqueue(now) {
 				livePusher.enqueue(liveFloorPushJob{
 					ControllerID:       cfg.ControllerID,
 					SessionID:          frame.SessionId,
@@ -801,7 +828,7 @@ func metricsLoop(ctx context.Context, metrics *controllerMetrics) {
 	}
 }
 
-func statusLoop(ctx context.Context, cfg config, hub *websocketHub, metrics *controllerMetrics) {
+func statusLoop(ctx context.Context, cfg config, hub *websocketHub, metrics *controllerMetrics, duplex *duplexHub) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -809,7 +836,9 @@ func statusLoop(ctx context.Context, cfg config, hub *websocketHub, metrics *con
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			hub.broadcastJSON(snapshotStatus(metrics, cfg, hub))
+			status := snapshotStatus(metrics, cfg, hub)
+			hub.broadcastJSON(status)
+			duplex.broadcastStatus(status)
 		}
 	}
 }
@@ -1213,6 +1242,9 @@ func (h *websocketHub) readClient(client *websocketClient, state *controllerStat
 			if h.pressureStreams != nil {
 				h.pressureStreams.broadcast(event)
 			}
+			if h.duplex != nil {
+				h.duplex.broadcastPressure(event)
+			}
 		}
 	}
 }
@@ -1439,5 +1471,5 @@ func (c config) String() string {
 	if strings.TrimSpace(c.LivePushPlatformURL) != "" && c.LivePushFPS > 0 {
 		livePush = fmt.Sprintf("%s@%dfps", c.LivePushPlatformURL, c.LivePushFPS)
 	}
-	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s refresh=%dfps udp=:%d floor-source-ip=%s broadcast=%s:%d live-push=%s fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.RefreshFPS, c.RecvPort, c.FloorSourceIP, c.BroadcastIP, c.BroadcastPort, livePush, c.EngineFadeDelay, c.EngineFadeDuration)
+	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s duplex=%s refresh=%dfps udp=:%d floor-source-ip=%s broadcast=%s:%d live-push=%s fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.DuplexAddr, c.RefreshFPS, c.RecvPort, c.FloorSourceIP, c.BroadcastIP, c.BroadcastPort, livePush, c.EngineFadeDelay, c.EngineFadeDuration)
 }

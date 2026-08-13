@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package motionlevels.floor.v2;
+
+option go_package = "github.com/motionlevels/motion-levels-controller/contracts/floorpb";
+
+// Envelope is the only message on the protocol-v2 duplex stream. The first
+// message from each peer must be its hello message with protocol_version=2.
+message Envelope {
+  oneof payload {
+    EngineHello engine_hello = 1;
+    AdapterHello adapter_hello = 2;
+    DesiredFrame desired_frame = 3;
+    PressureEvent pressure_event = 4;
+    PresentedFrame presented_frame = 5;
+    AdapterStatus adapter_status = 6;
+  }
+}
+
+message EngineHello {
+  uint32 protocol_version = 1;
+  string engine_revision = 2;
+}
+
+message AdapterHello {
+  uint32 protocol_version = 1;
+  string adapter_revision = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  uint32 target_fps = 5;
+}
+
+// DesiredFrame contains only technical presentation data. Game, run, session,
+// player, and platform identity deliberately remain engine-owned.
+message DesiredFrame {
+  uint64 sequence = 1;
+  int64 unix_nanos = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  bytes rgb = 5;
+}
+
+message PressureEvent {
+  uint64 sequence = 1;
+  int64 unix_nanos = 2;
+  uint32 x = 3;
+  uint32 y = 4;
+  bool pressed = 5;
+  uint32 hardware_controller = 6;
+  uint32 hardware_channel = 7;
+  uint32 hardware_position = 8;
+}
+
+// PresentedFrame reports the post-watchdog, post-pressure frame actually sent
+// to the floor. This preserves observed live-view semantics in the engine.
+message PresentedFrame {
+  uint64 presentation_sequence = 1;
+  uint64 desired_sequence = 2;
+  int64 presented_unix_nanos = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  bytes rgb = 6;
+  bytes pressure_bits = 7;
+  float fade_ratio = 8;
+}
+
+message AdapterStatus {
+  int64 unix_nanos = 1;
+  uint64 presented_frames = 2;
+  double actual_fps = 3;
+  uint32 target_fps = 4;
+  int64 desired_frame_age_millis = 5;
+  uint64 udp_send_errors = 6;
+}
