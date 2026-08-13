@@ -27,10 +27,17 @@ jobs:
           cache: true
 
       - name: Set up protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "35.1"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          protoc_dir="${RUNNER_TEMP}/protoc-35.1"
+          mkdir -p "${protoc_dir}"
+          curl -fsSL \
+            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip \
+            -o "${protoc_dir}/protoc.zip"
+          docker run --rm \
+            -v "${protoc_dir}:/work" \
+            busybox:1.37 \
+            unzip -qo /work/protoc.zip -d /work
+          echo "${protoc_dir}/bin" >> "${GITHUB_PATH}"
 
       - name: Install protoc-gen-go
         run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
