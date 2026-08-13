@@ -1,12 +1,40 @@
 # Motion Levels Floor Adapter
 
-This repository owns the hardware-facing floor adapter source and the immutable
-`ghcr.io/motionlevels/motion-levels-controller:sha-<full-commit>` image. The
-venue repository promotes an exact adapter revision into an atomic venue
-release; this repository never deploys itself or runs an automatic updater.
+This repository owns the hardware-facing floor adapter source. The venue
+repository pins an exact source revision, builds its static Linux/amd64 binary
+with the helper in this repository, and promotes that verified binary into an
+atomic venue release. This repository never deploys itself or runs an automatic
+updater. The immutable container image remains available for isolated runtime
+testing, but is not required by the native venue deployment.
 
-The adapter uses host networking for the floor UDP protocol, but the production
-container is non-root, read-only, capability-free, and has no device mappings.
+The adapter uses the host network for the floor UDP protocol. Venue packaging
+is responsible for its dedicated non-root user, systemd sandbox, writable state
+boundary, and loopback-only management listeners.
+
+## Pinned native build
+
+`scripts/build-native.sh` builds only from the checked-out full Git revision,
+refuses dirty controller runtime inputs, disables CGO and VCS-dependent build
+metadata, embeds that revision, and emits a Linux/amd64 binary plus canonical
+SHA-256 and JSON metadata sidecars. The same source, Go toolchain, and build
+flags produce the same binary.
+
+```sh
+make native-build
+make native-verify
+```
+
+The files are revision-qualified under `dist/`:
+
+- `motion-levels-controller-linux-amd64-<revision>`;
+- `motion-levels-controller-linux-amd64-<revision>.sha256`;
+- `motion-levels-controller-linux-amd64-<revision>.metadata.json`.
+
+Ansible should check out the pinned source revision, set
+`CONTROLLER_EXPECTED_GO_VERSION` to the venue lock's exact Go version, run the
+builder, verify the metadata, then install the binary by its recorded SHA-256.
+The verifier also requires a static AMD64 ELF and confirms that the full source
+revision is embedded in the executable.
 
 ## Responsibility boundary
 

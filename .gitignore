@@ -1,6 +1,7 @@
 .DS_Store
 .motion-levels-controller-id
 bin/
+dist/
 coverage.out
 recordings/
 *.pbstream
