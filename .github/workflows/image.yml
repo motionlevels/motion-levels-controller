@@ -33,7 +33,14 @@ jobs:
       - name: Validate deployment files
         run: |
           bash -n deploy/entrypoint.sh
-          docker compose config --quiet
+          if docker compose version >/dev/null 2>&1; then
+            docker compose config --quiet
+          elif command -v docker-compose >/dev/null 2>&1; then
+            docker-compose config --quiet
+          else
+            echo "Docker Compose is unavailable on this runner" >&2
+            exit 1
+          fi
 
   publish:
     needs: validate
