@@ -74,7 +74,7 @@ jobs:
           build-args: |
             BUILD_REVISION=${{ github.sha }}
             BUILD_CREATED_AT=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
-            CONTROLLER_PROTOCOL_VERSION=v1
+            CONTROLLER_PROTOCOL_VERSION=v1+v2
           cache-from: type=gha,scope=controller
           cache-to: type=gha,mode=max,scope=controller
           provenance: mode=max
