@@ -2,10 +2,8 @@ IMAGE ?= motion-levels-controller:local
 
 .PHONY: check test vet generate proto-check docker-build
 
-check: proto-check test vet
-	@files="$$(gofmt -l cmd internal contracts)"; test -z "$$files" || { printf 'gofmt required:\n%s\n' "$$files"; exit 1; }
-	bash -n deploy/entrypoint.sh
-	@if command -v shellcheck >/dev/null 2>&1; then shellcheck deploy/entrypoint.sh; fi
+check:
+	sh scripts/check.sh
 
 test:
 	go test ./...

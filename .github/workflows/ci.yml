@@ -43,7 +43,7 @@ jobs:
         run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 
       - name: Validate
-        run: make check
+        run: sh scripts/check.sh
 
       - name: Build image
         run: docker build --build-arg "BUILD_REVISION=${GITHUB_SHA}" -t motion-levels-controller:ci .
