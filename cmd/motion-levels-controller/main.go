@@ -32,7 +32,6 @@ import (
 	"github.com/motionlevels/motion-levels-controller/contracts/recordingpb"
 	"github.com/motionlevels/motion-levels-controller/internal/controllerid"
 	"github.com/motionlevels/motion-levels-controller/internal/floor"
-	"github.com/motionlevels/motion-levels-controller/internal/recording"
 	"golang.org/x/net/ipv4"
 	"google.golang.org/protobuf/proto"
 )
@@ -41,35 +40,22 @@ import (
 var webFS embed.FS
 
 type config struct {
-	HTTPAddr                 string
-	FrameAddr                string
-	InputAddr                string
-	RecvPort                 int
-	FloorSourceIP            string
-	BroadcastIP              string
-	BroadcastPort            int
-	ControllerID             string
-	ControllerIDFile         string
-	RecordFrames             string
-	RecordCompression        string
-	RecordPostCompression    string
-	RecordSegmentBytes       int64
-	RecordSegmentDuration    time.Duration
-	RecordDeleteRawAfter     time.Duration
-	RecordMaxPendingRawBytes int64
-	RecordUploadPlatformURL  string
-	RecordUploadToken        string
-	RecordUploadSessionID    string
-	RecordUploadQueueSize    int
-	RecordUploadTimeout      time.Duration
-	LivePushPlatformURL      string
-	LivePushToken            string
-	LivePushFPS              int
-	LivePushTimeout          time.Duration
-	ZstdPath                 string
-	RefreshFPS               int
-	EngineFadeDelay          time.Duration
-	EngineFadeDuration       time.Duration
+	HTTPAddr            string
+	FrameAddr           string
+	InputAddr           string
+	RecvPort            int
+	FloorSourceIP       string
+	BroadcastIP         string
+	BroadcastPort       int
+	ControllerID        string
+	ControllerIDFile    string
+	LivePushPlatformURL string
+	LivePushToken       string
+	LivePushFPS         int
+	LivePushTimeout     time.Duration
+	RefreshFPS          int
+	EngineFadeDelay     time.Duration
+	EngineFadeDuration  time.Duration
 }
 
 type websocketHub struct {
@@ -176,36 +162,32 @@ type inputMessage struct {
 }
 
 type configMessage struct {
-	Type            string `json:"type"`
-	RefreshFPS      int    `json:"refreshFps"`
-	GridWidth       int    `json:"gridWidth"`
-	GridHeight      int    `json:"gridHeight"`
-	FrameAddr       string `json:"frameAddr"`
-	InputAddr       string `json:"inputAddr"`
-	RecvPort        int    `json:"recvPort"`
-	BroadcastAddr   string `json:"broadcastAddr"`
-	FloorSourceIP   string `json:"floorSourceIp,omitempty"`
-	ControllerID    string `json:"controllerId"`
-	Recording       bool   `json:"recording"`
-	Compression     string `json:"compression"`
-	PostCompression string `json:"postCompression"`
+	Type          string `json:"type"`
+	RefreshFPS    int    `json:"refreshFps"`
+	GridWidth     int    `json:"gridWidth"`
+	GridHeight    int    `json:"gridHeight"`
+	FrameAddr     string `json:"frameAddr"`
+	InputAddr     string `json:"inputAddr"`
+	RecvPort      int    `json:"recvPort"`
+	BroadcastAddr string `json:"broadcastAddr"`
+	FloorSourceIP string `json:"floorSourceIp,omitempty"`
+	ControllerID  string `json:"controllerId"`
 }
 
 type statusMessage struct {
-	Type              string          `json:"type"`
-	UptimeSeconds     int64           `json:"uptimeSeconds"`
-	PresentedFrames   uint64          `json:"presentedFrames"`
-	ActualFPS         float64         `json:"actualFps"`
-	RefreshFPS        int             `json:"refreshFps"`
-	WebsocketClients  int             `json:"websocketClients"`
-	UDPErrorCount     uint64          `json:"udpErrorCount"`
-	GameFrameAgeMS    int64           `json:"gameFrameAgeMs"`
-	GameFrameSequence uint64          `json:"gameFrameSequence"`
-	GameEngineOnline  bool            `json:"gameEngineOnline"`
-	EngineFadeAmount  float64         `json:"engineFadeAmount"`
-	ControllerID      string          `json:"controllerId"`
-	Sync              syncStatus      `json:"sync"`
-	Recording         recording.Stats `json:"recording"`
+	Type              string     `json:"type"`
+	UptimeSeconds     int64      `json:"uptimeSeconds"`
+	PresentedFrames   uint64     `json:"presentedFrames"`
+	ActualFPS         float64    `json:"actualFps"`
+	RefreshFPS        int        `json:"refreshFps"`
+	WebsocketClients  int        `json:"websocketClients"`
+	UDPErrorCount     uint64     `json:"udpErrorCount"`
+	GameFrameAgeMS    int64      `json:"gameFrameAgeMs"`
+	GameFrameSequence uint64     `json:"gameFrameSequence"`
+	GameEngineOnline  bool       `json:"gameEngineOnline"`
+	EngineFadeAmount  float64    `json:"engineFadeAmount"`
+	ControllerID      string     `json:"controllerId"`
+	Sync              syncStatus `json:"sync"`
 }
 
 type syncStatus struct {
@@ -283,24 +265,11 @@ func parseConfig() config {
 	flag.IntVar(&cfg.BroadcastPort, "broadcast-port", 4626, "UDP broadcast port for LED packets")
 	flag.StringVar(&cfg.ControllerID, "controller-id", "", "stable controller UUID override; normally leave empty and use controller-id-file")
 	flag.StringVar(&cfg.ControllerIDFile, "controller-id-file", controllerid.DefaultPath, "file used to persist this controller's generated UUID")
-	flag.StringVar(&cfg.RecordFrames, "record-frames", "", "recording directory or .pbstream file; empty disables recording")
-	flag.StringVar(&cfg.RecordCompression, "record-compression", "none", "hot-path recording compression: none or gzip")
-	flag.StringVar(&cfg.RecordPostCompression, "record-post-compression", "zstd", "background compression for closed recording segments: zstd or none")
-	flag.Int64Var(&cfg.RecordSegmentBytes, "record-segment-bytes", recording.DefaultMaxSegmentBytes, "maximum recording segment size in bytes before rotating")
-	flag.DurationVar(&cfg.RecordSegmentDuration, "record-segment-duration", recording.DefaultMaxSegmentDuration, "maximum recording segment duration before rotating")
-	flag.DurationVar(&cfg.RecordDeleteRawAfter, "record-delete-raw-after", recording.DefaultDeleteRawAfter, "delete raw segment this long after verified compressed segment exists")
-	flag.Int64Var(&cfg.RecordMaxPendingRawBytes, "record-max-pending-raw-bytes", recording.DefaultMaxPendingRawBytes, "maximum active and closed raw recording bytes before recording stops")
-	flag.StringVar(&cfg.RecordUploadPlatformURL, "record-upload-platform-url", "", "platform base URL for direct RustFS recording uploads; empty disables")
-	flag.StringVar(&cfg.RecordUploadToken, "record-upload-token", os.Getenv("MOTION_LEVELS_PLATFORM_TOKEN"), "platform bearer token for recording upload endpoints; can also use MOTION_LEVELS_PLATFORM_TOKEN")
-	flag.StringVar(&cfg.RecordUploadSessionID, "record-upload-session-id", "", "optional game session id to attach uploaded recording segments to")
-	flag.IntVar(&cfg.RecordUploadQueueSize, "record-upload-queue-size", 256, "maximum finalized recording segments queued for platform upload")
-	flag.DurationVar(&cfg.RecordUploadTimeout, "record-upload-timeout", 5*time.Minute, "HTTP timeout for each platform/RustFS recording upload operation")
 	flag.StringVar(&cfg.LivePushPlatformURL, "live-push-platform-url", livePushPlatformURL, "platform base URL for outbound live floor preview frames; empty disables")
 	flag.StringVar(&cfg.LivePushToken, "live-push-token", livePushToken, "platform bearer token for live floor preview ingest; can also use MOTION_LEVELS_LIVE_PUSH_TOKEN or MOTION_LEVELS_PLATFORM_TOKEN")
 	flag.IntVar(&cfg.LivePushFPS, "live-push-fps", envInt("MOTION_LEVELS_LIVE_PUSH_FPS", 5), "maximum outbound live floor preview push rate; 0 disables")
 	flag.DurationVar(&cfg.LivePushTimeout, "live-push-timeout", envDuration("MOTION_LEVELS_LIVE_PUSH_TIMEOUT", 2*time.Second), "HTTP timeout for live floor preview pushes")
-	flag.StringVar(&cfg.ZstdPath, "zstd-path", "zstd", "path to zstd executable for background recording compression")
-	flag.IntVar(&cfg.RefreshFPS, "refresh-fps", 50, "floor-controller output refresh rate for UDP, websocket, and recording")
+	flag.IntVar(&cfg.RefreshFPS, "refresh-fps", 50, "floor-controller output refresh rate for UDP and websocket preview")
 	flag.DurationVar(&cfg.EngineFadeDelay, "engine-fade-delay", 2*time.Second, "time to hold the last game frame after the game-engine disconnects before fading")
 	flag.DurationVar(&cfg.EngineFadeDuration, "engine-fade-duration", 3*time.Second, "duration of the fade to black after engine-fade-delay")
 	flag.Parse()
@@ -322,30 +291,6 @@ func (c config) validate() error {
 		if parsed := net.ParseIP(value); parsed == nil || parsed.To4() == nil {
 			errs = append(errs, fmt.Errorf("floor-source-ip must be a valid IPv4 address"))
 		}
-	}
-	if !recording.SupportedCompression(c.RecordCompression) {
-		errs = append(errs, fmt.Errorf("record-compression must be gzip or none"))
-	}
-	if !recording.SupportedPostCompression(c.RecordPostCompression) {
-		errs = append(errs, fmt.Errorf("record-post-compression must be zstd or none"))
-	}
-	if c.RecordSegmentBytes < 1 {
-		errs = append(errs, fmt.Errorf("record-segment-bytes must be at least 1"))
-	}
-	if c.RecordSegmentDuration <= 0 {
-		errs = append(errs, fmt.Errorf("record-segment-duration must be positive"))
-	}
-	if c.RecordDeleteRawAfter < 0 {
-		errs = append(errs, fmt.Errorf("record-delete-raw-after must be non-negative"))
-	}
-	if c.RecordMaxPendingRawBytes < 1 {
-		errs = append(errs, fmt.Errorf("record-max-pending-raw-bytes must be at least 1"))
-	}
-	if c.RecordUploadQueueSize < 1 {
-		errs = append(errs, fmt.Errorf("record-upload-queue-size must be at least 1"))
-	}
-	if c.RecordUploadTimeout <= 0 {
-		errs = append(errs, fmt.Errorf("record-upload-timeout must be positive"))
 	}
 	if c.LivePushFPS < 0 {
 		errs = append(errs, fmt.Errorf("live-push-fps must be zero or greater"))
@@ -397,45 +342,21 @@ func run(ctx context.Context, cfg config) error {
 	hub := &websocketHub{clients: make(map[*websocket.Conn]*websocketClient), config: cfg.configMessage(), pressureStreams: pressureStreams}
 	state := &controllerState{sensorState: make(map[sensorKey]bool)}
 	frames := &latestFrameBuffer{}
-	frameRecorder, err := recording.NewFrameRecorderWithOptions(cfg.RecordFrames, recording.Options{
-		Compression:        cfg.RecordCompression,
-		PostCompression:    cfg.RecordPostCompression,
-		ZstdPath:           cfg.ZstdPath,
-		MaxSegmentBytes:    cfg.RecordSegmentBytes,
-		MaxSegmentDuration: cfg.RecordSegmentDuration,
-		DeleteRawAfter:     cfg.RecordDeleteRawAfter,
-		MaxPendingRawBytes: cfg.RecordMaxPendingRawBytes,
-		ControllerID:       cfg.ControllerID,
-		Upload: recording.UploadOptions{
-			PlatformURL: cfg.RecordUploadPlatformURL,
-			APIToken:    cfg.RecordUploadToken,
-			SessionID:   cfg.RecordUploadSessionID,
-			QueueSize:   cfg.RecordUploadQueueSize,
-			HTTPTimeout: cfg.RecordUploadTimeout,
-		},
-	})
-	if err != nil {
-		return err
-	}
-	defer frameRecorder.Close()
-	if cfg.RecordFrames != "" {
-		log.Printf("frame recording: %s", frameRecorder.Path())
-	}
 	livePusher := newLiveFramePusher(cfg)
 	if livePusher != nil {
 		go livePusher.run(ctx)
 		log.Printf("live floor push: %s at up to %d fps", livePusher.endpoint, cfg.LivePushFPS)
 	}
 	log.Printf("controller id: %s", cfg.ControllerID)
-	log.Printf("config: %s recording=%s", cfg, frameRecorder.Path())
+	log.Printf("config: %s", cfg)
 
 	go metricsLoop(ctx, metrics)
-	go statusLoop(ctx, cfg, hub, metrics, frameRecorder)
+	go statusLoop(ctx, cfg, hub, metrics)
 	go readUDP(ctx, conn, state, hub, pressureStreams)
-	go serveHTTP(ctx, cfg, hub, state, metrics, frameRecorder)
+	go serveHTTP(ctx, cfg, hub, state, metrics)
 	go listenPressureSubscribers(ctx, cfg.InputAddr, pressureStreams)
 	go syncLoop(ctx, sender, broadcastAddr, metrics)
-	go presentationLoop(ctx, cfg, sender, broadcastAddr, hub, state, frames, frameRecorder, metrics, livePusher)
+	go presentationLoop(ctx, cfg, sender, broadcastAddr, hub, state, frames, metrics, livePusher)
 	return listenFrameStream(ctx, cfg.FrameAddr, func(record *recordingpb.FrameRecord, receivedAt time.Time) {
 		metrics.markGameFrame(record, receivedAt)
 		frames.update(record)
@@ -581,7 +502,7 @@ func listenPressureSubscribers(ctx context.Context, addr string, hub *pressureSt
 	}
 }
 
-func newHTTPHandler(cfg config, hub *websocketHub, state *controllerState, metrics *controllerMetrics, recorder *recording.FrameRecorder) http.Handler {
+func newHTTPHandler(cfg config, hub *websocketHub, state *controllerState, metrics *controllerMetrics) http.Handler {
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
 		log.Fatal(err)
@@ -618,11 +539,11 @@ func newHTTPHandler(cfg config, hub *websocketHub, state *controllerState, metri
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		if err := json.NewEncoder(w).Encode(snapshotStatus(metrics, cfg, hub, recorder)); err != nil {
+		if err := json.NewEncoder(w).Encode(snapshotStatus(metrics, cfg, hub)); err != nil {
 			log.Printf("status response: %v", err)
 		}
 	})
-	mux.HandleFunc("/metrics", controllerMetricsHandler(cfg, hub, metrics, recorder))
+	mux.HandleFunc("/metrics", controllerMetricsHandler(cfg, hub, metrics))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -635,11 +556,11 @@ func newHTTPHandler(cfg config, hub *websocketHub, state *controllerState, metri
 	return mux
 }
 
-func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *controllerState, metrics *controllerMetrics, recorder *recording.FrameRecorder) {
+func serveHTTP(ctx context.Context, cfg config, hub *websocketHub, state *controllerState, metrics *controllerMetrics) {
 	for _, url := range previewURLs(cfg.HTTPAddr, "/") {
 		log.Printf("preview: %s", url)
 	}
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: newHTTPHandler(cfg, hub, state, metrics, recorder)}
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: newHTTPHandler(cfg, hub, state, metrics)}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -736,7 +657,7 @@ func (g *gameEngineStreamGate) release() {
 	g.active = false
 }
 
-func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *net.UDPAddr, hub *websocketHub, state *controllerState, frames *latestFrameBuffer, recorder *recording.FrameRecorder, metrics *controllerMetrics, livePusher *liveFramePusher) {
+func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *net.UDPAddr, hub *websocketHub, state *controllerState, frames *latestFrameBuffer, metrics *controllerMetrics, livePusher *liveFramePusher) {
 	log.Printf("presentation refresh: %d fps", cfg.RefreshFPS)
 	ticker := time.NewTicker(time.Second / time.Duration(cfg.RefreshFPS))
 	defer ticker.Stop()
@@ -755,17 +676,6 @@ func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *
 			tiles := tilesFromFrame(frame, state.snapshotPressed())
 			if fade := metrics.engineFadeAmount(now, cfg.EngineFadeDelay, cfg.EngineFadeDuration); fade > 0 {
 				tiles = fadeTiles(tiles, 1-fade)
-			}
-			lineage := recording.FrameLineage{
-				SessionID:                    frame.SessionId,
-				VenueSessionID:               frame.VenueSessionId,
-				GameFrameSequence:            frame.GameFrameSequence,
-				GameUnixNanos:                frame.GameUnixNanos,
-				ControllerReceivedUnixNanos:  frame.ControllerReceivedUnixNanos,
-				ControllerPresentedUnixNanos: now.UnixNano(),
-			}
-			if err := recorder.RecordFrameWithLineage(sequence, now.UnixNano(), frame.Width, frame.Height, tiles, lineage); err != nil {
-				log.Printf("record frame: %v", err)
 			}
 			sendFrame(sender, addr, tiles, metrics)
 			metrics.markPresented(sequence, now, frame)
@@ -891,7 +801,7 @@ func metricsLoop(ctx context.Context, metrics *controllerMetrics) {
 	}
 }
 
-func statusLoop(ctx context.Context, cfg config, hub *websocketHub, metrics *controllerMetrics, recorder *recording.FrameRecorder) {
+func statusLoop(ctx context.Context, cfg config, hub *websocketHub, metrics *controllerMetrics) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -899,12 +809,12 @@ func statusLoop(ctx context.Context, cfg config, hub *websocketHub, metrics *con
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			hub.broadcastJSON(snapshotStatus(metrics, cfg, hub, recorder))
+			hub.broadcastJSON(snapshotStatus(metrics, cfg, hub))
 		}
 	}
 }
 
-func snapshotStatus(metrics *controllerMetrics, cfg config, hub *websocketHub, recorder *recording.FrameRecorder) statusMessage {
+func snapshotStatus(metrics *controllerMetrics, cfg config, hub *websocketHub) statusMessage {
 	now := time.Now()
 	gameFrameAgeMS := int64(-1)
 	if received := metrics.lastGameFrameReceived.Load(); received > 0 {
@@ -924,7 +834,6 @@ func snapshotStatus(metrics *controllerMetrics, cfg config, hub *websocketHub, r
 		EngineFadeAmount:  metrics.engineFadeAmount(now, cfg.EngineFadeDelay, cfg.EngineFadeDuration),
 		ControllerID:      cfg.ControllerID,
 		Sync:              metrics.syncStatus(),
-		Recording:         recorder.Stats(),
 	}
 }
 
@@ -1198,19 +1107,16 @@ func (b *latestFrameBuffer) snapshot() (*recordingpb.FrameRecord, bool) {
 
 func (c config) configMessage() configMessage {
 	return configMessage{
-		Type:            "config",
-		RefreshFPS:      c.RefreshFPS,
-		GridWidth:       floor.GridWidth,
-		GridHeight:      floor.GridHeight,
-		FrameAddr:       c.FrameAddr,
-		InputAddr:       c.InputAddr,
-		RecvPort:        c.RecvPort,
-		BroadcastAddr:   fmt.Sprintf("%s:%d", c.BroadcastIP, c.BroadcastPort),
-		FloorSourceIP:   c.FloorSourceIP,
-		ControllerID:    c.ControllerID,
-		Recording:       c.RecordFrames != "",
-		Compression:     recording.NormalizeCompression(c.RecordCompression),
-		PostCompression: recording.NormalizePostCompression(c.RecordPostCompression),
+		Type:          "config",
+		RefreshFPS:    c.RefreshFPS,
+		GridWidth:     floor.GridWidth,
+		GridHeight:    floor.GridHeight,
+		FrameAddr:     c.FrameAddr,
+		InputAddr:     c.InputAddr,
+		RecvPort:      c.RecvPort,
+		BroadcastAddr: fmt.Sprintf("%s:%d", c.BroadcastIP, c.BroadcastPort),
+		FloorSourceIP: c.FloorSourceIP,
+		ControllerID:  c.ControllerID,
 	}
 }
 
@@ -1529,13 +1435,9 @@ func (s *controllerState) snapshotPressed() [floor.GridHeight][floor.GridWidth]b
 }
 
 func (c config) String() string {
-	upload := "off"
-	if strings.TrimSpace(c.RecordUploadPlatformURL) != "" {
-		upload = c.RecordUploadPlatformURL
-	}
 	livePush := "off"
 	if strings.TrimSpace(c.LivePushPlatformURL) != "" && c.LivePushFPS > 0 {
 		livePush = fmt.Sprintf("%s@%dfps", c.LivePushPlatformURL, c.LivePushFPS)
 	}
-	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s refresh=%dfps udp=:%d floor-source-ip=%s broadcast=%s:%d record-compression=%s post-compression=%s record-segment-bytes=%d record-segment-duration=%s delete-raw-after=%s max-pending-raw=%d record-upload=%s live-push=%s fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.RefreshFPS, c.RecvPort, c.FloorSourceIP, c.BroadcastIP, c.BroadcastPort, recording.NormalizeCompression(c.RecordCompression), recording.NormalizePostCompression(c.RecordPostCompression), c.RecordSegmentBytes, c.RecordSegmentDuration, c.RecordDeleteRawAfter, c.RecordMaxPendingRawBytes, upload, livePush, c.EngineFadeDelay, c.EngineFadeDuration)
+	return fmt.Sprintf("controller-id=%s http=%s frames=%s input-events=%s refresh=%dfps udp=:%d floor-source-ip=%s broadcast=%s:%d live-push=%s fade=%s+%s", c.ControllerID, c.HTTPAddr, c.FrameAddr, c.InputAddr, c.RefreshFPS, c.RecvPort, c.FloorSourceIP, c.BroadcastIP, c.BroadcastPort, livePush, c.EngineFadeDelay, c.EngineFadeDuration)
 }

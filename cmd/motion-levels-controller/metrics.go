@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/motionlevels/motion-levels-controller/internal/recording"
 )
 
 var buildRevision = "unknown"
@@ -32,7 +30,7 @@ func (p *prometheusWriter) metric(name, help, kind string, value any, labels ...
 	_, _ = fmt.Fprintf(&p.b, " %v\n", value)
 }
 
-func controllerMetricsHandler(cfg config, hub *websocketHub, metrics *controllerMetrics, recorder *recording.FrameRecorder) http.HandlerFunc {
+func controllerMetricsHandler(cfg config, hub *websocketHub, metrics *controllerMetrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -44,8 +42,7 @@ func controllerMetricsHandler(cfg config, hub *websocketHub, metrics *controller
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		status := snapshotStatus(metrics, cfg, hub, recorder)
-		recordingStats := status.Recording
+		status := snapshotStatus(metrics, cfg, hub)
 		now := time.Now()
 		frameAge := float64(status.GameFrameAgeMS) / 1000
 		if status.GameFrameAgeMS < 0 {
@@ -73,17 +70,6 @@ func controllerMetricsHandler(cfg config, hub *websocketHub, metrics *controller
 		p.metric("motion_levels_controller_engine_clock_offset_seconds", "Observed engine to controller clock offset.", "gauge", status.Sync.EngineClockOffsetMS/1000)
 		p.metric("motion_levels_controller_present_latency_seconds", "Observed controller presentation latency.", "gauge", status.Sync.PresentLatencyMS/1000)
 		p.metric("motion_levels_controller_sync_jitter_seconds", "Observed frame synchronization jitter.", "gauge", status.Sync.JitterMS/1000)
-		p.metric("motion_levels_controller_recording_enabled", "Whether floor frame recording is enabled.", "gauge", boolNumber(recordingStats.Path != ""))
-		p.metric("motion_levels_controller_recording_queue_depth", "Frames waiting in the recording queue.", "gauge", recordingStats.QueueDepth)
-		p.metric("motion_levels_controller_recording_queue_capacity", "Capacity of the recording queue.", "gauge", recordingStats.QueueCapacity)
-		p.metric("motion_levels_controller_recording_written_frames_total", "Frames written to recordings.", "counter", recordingStats.WrittenFrames)
-		p.metric("motion_levels_controller_recording_dropped_frames_total", "Frames dropped by the recording path.", "counter", recordingStats.DroppedFrames)
-		p.metric("motion_levels_controller_recording_pending_raw_bytes", "Raw recording bytes waiting for compression or cleanup.", "gauge", recordingStats.PendingRawBytes)
-		p.metric("motion_levels_controller_recording_error", "Whether recording currently reports an error.", "gauge", boolNumber(recordingStats.Error != "" || recordingStats.CompressionError != ""))
-		p.metric("motion_levels_controller_recording_upload_queue_depth", "Recording segments waiting for upload.", "gauge", recordingStats.Upload.QueueDepth)
-		p.metric("motion_levels_controller_recording_uploaded_segments_total", "Recording segments uploaded successfully.", "counter", recordingStats.Upload.UploadedSegments)
-		p.metric("motion_levels_controller_recording_failed_uploads_total", "Recording segment upload attempts that failed.", "counter", recordingStats.Upload.FailedSegments)
-		p.metric("motion_levels_controller_recording_dropped_uploads_total", "Recording segments dropped before upload.", "counter", recordingStats.Upload.DroppedSegments)
 		_, _ = w.Write([]byte(p.b.String()))
 	}
 }

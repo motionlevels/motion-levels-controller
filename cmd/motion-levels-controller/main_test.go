@@ -16,7 +16,7 @@ import (
 )
 
 func TestHTTPHandlerDoesNotExposeHostKioskControl(t *testing.T) {
-	handler := newHTTPHandler(config{}, nil, nil, nil, nil)
+	handler := newHTTPHandler(config{}, nil, nil, nil)
 	for _, testCase := range []struct {
 		method string
 		path   string
@@ -109,7 +109,7 @@ func TestLatestFrameBufferCopiesIncomingFrame(t *testing.T) {
 func TestSnapshotStatusIncludesConfiguredRefreshFPS(t *testing.T) {
 	metrics := &controllerMetrics{startedAt: time.Now()}
 	hub := &websocketHub{clients: make(map[*websocket.Conn]*websocketClient)}
-	status := snapshotStatus(metrics, config{RefreshFPS: 50}, hub, nil)
+	status := snapshotStatus(metrics, config{RefreshFPS: 50}, hub)
 	if status.RefreshFPS != 50 {
 		t.Fatalf("refresh fps = %d, want 50", status.RefreshFPS)
 	}
@@ -120,7 +120,7 @@ func TestMetricsEndpointExportsBoundedControllerHealth(t *testing.T) {
 	metrics.markGameEngineConnected()
 	metrics.actualFPSBits.Store(math.Float64bits(49.8))
 	hub := &websocketHub{clients: make(map[*websocket.Conn]*websocketClient)}
-	handler := newHTTPHandler(config{RefreshFPS: 50}, hub, &controllerState{}, metrics, nil)
+	handler := newHTTPHandler(config{RefreshFPS: 50}, hub, &controllerState{}, metrics)
 	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	response := httptest.NewRecorder()
 
@@ -134,7 +134,6 @@ func TestMetricsEndpointExportsBoundedControllerHealth(t *testing.T) {
 		"motion_levels_controller_up 1",
 		"motion_levels_controller_actual_fps 49.8",
 		"motion_levels_controller_game_engine_connected 1",
-		"motion_levels_controller_recording_enabled 0",
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("metrics missing %q:\n%s", expected, body)
@@ -154,7 +153,7 @@ func TestSnapshotStatusDoesNotWaitForClientWriteLock(t *testing.T) {
 
 	done := make(chan statusMessage, 1)
 	go func() {
-		done <- snapshotStatus(metrics, config{RefreshFPS: 50}, hub, nil)
+		done <- snapshotStatus(metrics, config{RefreshFPS: 50}, hub)
 	}()
 
 	select {
@@ -183,14 +182,12 @@ func TestGameEngineStreamGateAllowsOnlyOneActiveStream(t *testing.T) {
 
 func TestConfigMessageUsesControllerOwnedSettings(t *testing.T) {
 	message := config{
-		FrameAddr:         "127.0.0.1:4201",
-		RecvPort:          7800,
-		FloorSourceIP:     "127.0.0.1",
-		BroadcastIP:       "127.0.0.1",
-		BroadcastPort:     4626,
-		RecordFrames:      "recordings/live.frames.pbstream",
-		RecordCompression: "gzip",
-		RefreshFPS:        50,
+		FrameAddr:     "127.0.0.1:4201",
+		RecvPort:      7800,
+		FloorSourceIP: "127.0.0.1",
+		BroadcastIP:   "127.0.0.1",
+		BroadcastPort: 4626,
+		RefreshFPS:    50,
 	}.configMessage()
 
 	if message.Type != "config" {
@@ -210,12 +207,6 @@ func TestConfigMessageUsesControllerOwnedSettings(t *testing.T) {
 	}
 	if message.InputAddr != "" {
 		t.Fatalf("input address = %q, want empty default from test config", message.InputAddr)
-	}
-	if !message.Recording {
-		t.Fatal("recording should be enabled when RecordFrames is set")
-	}
-	if message.Compression != "gzip" {
-		t.Fatalf("compression = %q, want gzip", message.Compression)
 	}
 }
 
@@ -252,19 +243,6 @@ func TestUDPSenderPinsConfiguredLoopbackSource(t *testing.T) {
 	}
 	if !source.IP.Equal(net.ParseIP("127.0.0.1")) {
 		t.Fatalf("source IP = %s, want 127.0.0.1", source.IP)
-	}
-}
-
-func TestConfigMessageDisablesRecordingWhenRecordFramesIsEmpty(t *testing.T) {
-	message := config{
-		FrameAddr:    "127.0.0.1:4201",
-		RecvPort:     7800,
-		RefreshFPS:   50,
-		RecordFrames: "",
-	}.configMessage()
-
-	if message.Recording {
-		t.Fatal("recording should be disabled when RecordFrames is empty")
 	}
 }
 
@@ -334,15 +312,13 @@ func TestBuildViewerFrameEncodesRGBAndPressureBitset(t *testing.T) {
 
 func TestConfigValidationRejectsInvalidHardwareConfig(t *testing.T) {
 	cfg := config{
-		FrameAddr:         "127.0.0.1:4201",
-		RecvPort:          0,
-		BroadcastIP:       "not-an-ip",
-		FloorSourceIP:     "not-an-ip",
-		BroadcastPort:     4626,
-		RecordFrames:      "recordings",
-		RecordCompression: "zstd",
-		RefreshFPS:        0,
-		EngineFadeDelay:   -time.Second,
+		FrameAddr:       "127.0.0.1:4201",
+		RecvPort:        0,
+		BroadcastIP:     "not-an-ip",
+		FloorSourceIP:   "not-an-ip",
+		BroadcastPort:   4626,
+		RefreshFPS:      0,
+		EngineFadeDelay: -time.Second,
 	}
 	if err := cfg.validate(); err == nil {
 		t.Fatal("expected invalid config error")
@@ -363,12 +339,12 @@ func TestColorGridFromTilesSupportsConstantTimeLookup(t *testing.T) {
 	}
 }
 
-func TestStatusSnapshotIncludesRecorderHealth(t *testing.T) {
+func TestStatusSnapshotIncludesPresentationHealth(t *testing.T) {
 	metrics := newControllerMetrics()
 	metrics.markPresented(12, time.Now(), nil)
 	hub := &websocketHub{}
 
-	status := snapshotStatus(metrics, config{}, hub, nil)
+	status := snapshotStatus(metrics, config{}, hub)
 	if status.Type != "status" {
 		t.Fatalf("status type = %q, want status", status.Type)
 	}

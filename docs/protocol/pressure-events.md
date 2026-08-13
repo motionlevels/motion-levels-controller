@@ -2,9 +2,9 @@
 
 `floor-controller` keeps pressure state independently from rendered frames.
 
-Recordings store pressure sampled into each controller-presented frame. The
-game engine should receive live pressure changes as event messages instead of
-reading sampled pressure from recordings.
+The game engine receives live pressure changes as event messages. The controller
+also samples the current pressure state into each live viewer frame so the
+preview represents what was presented to the floor.
 
 The protobuf contract is:
 
@@ -28,5 +28,5 @@ The live stream is:
 floor-controller -> game-engine
 ```
 
-This stream is event-driven and low latency. It is separate from the
-controller-presented `FrameRecord` recording stream.
+This stream is event-driven and low latency. In protocol v1 it is separate from
+the engine-to-controller `FrameRecord` frame stream.
