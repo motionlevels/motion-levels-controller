@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"math"
 	"net"
 	"net/http"
@@ -33,6 +36,58 @@ func TestHTTPHandlerExposesOnlyHealthAndMetrics(t *testing.T) {
 				t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
 			}
 		})
+	}
+}
+
+func TestHealthStaysOKWhenFloorOutputIsUnavailable(t *testing.T) {
+	metrics := newControllerMetrics()
+	metrics.udpTransportKnown.Store(true)
+	metrics.udpTransportAvailable.Store(false)
+	handler := newHTTPHandler(config{RefreshFPS: 50}, metrics)
+	request := httptest.NewRequest(http.MethodGet, "/health", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if body := response.Body.String(); !strings.Contains(body, `"status":"ok"`) || !strings.Contains(body, `"floor_output":"unavailable"`) {
+		t.Fatalf("unexpected degraded health response: %s", body)
+	}
+}
+
+func TestRunStaysUpWithoutConfiguredFloorHardware(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, config{
+			HTTPAddr:        "127.0.0.1:0",
+			FrameAddr:       "",
+			InputAddr:       "",
+			DuplexAddr:      "",
+			RecvPort:        0,
+			FloorSourceIP:   "192.0.2.55",
+			BroadcastIP:     "127.0.0.1",
+			BroadcastPort:   4626,
+			RefreshFPS:      50,
+			EngineFadeDelay: time.Second,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("controller exited while configured floor hardware was absent: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("controller shutdown error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("controller did not stop after context cancellation")
 	}
 }
 
@@ -106,6 +161,10 @@ func TestMetricsEndpointExportsBoundedControllerHealth(t *testing.T) {
 	metrics := newControllerMetrics()
 	metrics.markGameEngineConnected()
 	metrics.actualFPSBits.Store(math.Float64bits(49.8))
+	metrics.udpSourceAssigned.Store(false)
+	metrics.udpTransportKnown.Store(true)
+	metrics.udpTransportAvailable.Store(false)
+	metrics.udpSourceResolveRuns.Store(3)
 	handler := newHTTPHandler(config{RefreshFPS: 50}, metrics)
 	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	response := httptest.NewRecorder()
@@ -120,6 +179,10 @@ func TestMetricsEndpointExportsBoundedControllerHealth(t *testing.T) {
 		"motion_levels_controller_up 1",
 		"motion_levels_controller_actual_fps 49.8",
 		"motion_levels_controller_game_engine_connected 1",
+		"motion_levels_controller_floor_source_assigned 0",
+		"motion_levels_controller_floor_transport_status_known 1",
+		"motion_levels_controller_floor_transport_available 0",
+		"motion_levels_controller_floor_source_resolution_attempts_total 3",
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("metrics missing %q:\n%s", expected, body)
@@ -156,7 +219,7 @@ func TestUDPSenderPinsConfiguredLoopbackSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	sender, err := newUDPSender(conn, "127.0.0.1")
+	sender, err := newUDPSender(conn, "127.0.0.1", newControllerMetrics())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +240,152 @@ func TestUDPSenderPinsConfiguredLoopbackSource(t *testing.T) {
 	}
 	if !source.IP.Equal(net.ParseIP("127.0.0.1")) {
 		t.Fatalf("source IP = %s, want 127.0.0.1", source.IP)
+	}
+}
+
+func TestUDPSenderStartsDegradedAndReacquiresConfiguredSource(t *testing.T) {
+	receiver, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+
+	conn, err := openUDP(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	metrics := newControllerMetrics()
+	sender, err := newUDPSender(conn, "127.0.0.1", metrics)
+	if err != nil {
+		t.Fatalf("sender construction must not require floor hardware: %v", err)
+	}
+	now := time.Unix(100, 0)
+	sender.now = func() time.Time { return now }
+	attempts := 0
+	sender.resolveSource = func(sourceIP net.IP) (udpSourceBinding, error) {
+		attempts++
+		if !sourceIP.Equal(net.ParseIP("127.0.0.1")) {
+			t.Fatalf("resolver source = %s, want exact configured 127.0.0.1", sourceIP)
+		}
+		if attempts == 1 {
+			return udpSourceBinding{}, fmt.Errorf("%w: test interface absent", errUDPSourceUnavailable)
+		}
+		return resolveUDPSource(sourceIP)
+	}
+
+	if _, err := sender.WriteToUDP([]byte("not-sent"), receiver.LocalAddr().(*net.UDPAddr)); !errors.Is(err, errUDPSourceUnavailable) {
+		t.Fatalf("first write error = %v, want source unavailable", err)
+	}
+	if _, err := sender.WriteToUDP([]byte("still-not-sent"), receiver.LocalAddr().(*net.UDPAddr)); !errors.Is(err, errUDPSourceUnavailable) {
+		t.Fatalf("second write error = %v, want cached source unavailable", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("resolver attempts during retry delay = %d, want 1", attempts)
+	}
+	if metrics.floorOutputStatus() != "unavailable" || metrics.udpSourceAssigned.Load() {
+		t.Fatalf("unexpected degraded transport state: status=%s assigned=%v", metrics.floorOutputStatus(), metrics.udpSourceAssigned.Load())
+	}
+
+	now = now.Add(2 * time.Second)
+	if _, err := sender.WriteToUDP([]byte("reacquired"), receiver.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("write after source reacquisition: %v", err)
+	}
+	buffer := make([]byte, 64)
+	if err := receiver.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	count, source, err := receiver.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(buffer[:count]); got != "reacquired" {
+		t.Fatalf("payload = %q, want reacquired", got)
+	}
+	if !source.IP.Equal(net.ParseIP("127.0.0.1")) {
+		t.Fatalf("source IP = %s, want exact configured 127.0.0.1", source.IP)
+	}
+	if attempts != 2 || metrics.udpSourceResolveRuns.Load() != 2 {
+		t.Fatalf("resolve attempts = %d metric=%d, want 2", attempts, metrics.udpSourceResolveRuns.Load())
+	}
+	if metrics.floorOutputStatus() != "available" || !metrics.udpSourceAssigned.Load() {
+		t.Fatalf("unexpected recovered transport state: status=%s assigned=%v", metrics.floorOutputStatus(), metrics.udpSourceAssigned.Load())
+	}
+}
+
+func TestUDPSenderNeverFallsBackWhenConfiguredSourceIsMissing(t *testing.T) {
+	receiver, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+	conn, err := openUDP(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	metrics := newControllerMetrics()
+	sender, err := newUDPSender(conn, "192.0.2.55", metrics)
+	if err != nil {
+		t.Fatalf("sender construction must accept an absent but valid configured source: %v", err)
+	}
+	sender.resolveSource = func(sourceIP net.IP) (udpSourceBinding, error) {
+		return udpSourceBinding{}, fmt.Errorf("%w: %s", errUDPSourceUnavailable, sourceIP)
+	}
+
+	if _, err := sender.WriteToUDP([]byte("must-not-fallback"), receiver.LocalAddr().(*net.UDPAddr)); !errors.Is(err, errUDPSourceUnavailable) {
+		t.Fatalf("write error = %v, want source unavailable", err)
+	}
+	if err := receiver.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 64)
+	if _, _, err := receiver.ReadFromUDP(buffer); err == nil {
+		t.Fatal("received UDP output through an unconfigured fallback route")
+	} else if networkError, ok := err.(net.Error); !ok || !networkError.Timeout() {
+		t.Fatalf("receiver error = %v, want timeout", err)
+	}
+	if metrics.floorOutputStatus() != "unavailable" {
+		t.Fatalf("floor output status = %s, want unavailable", metrics.floorOutputStatus())
+	}
+}
+
+func TestPresentationDoesNotReportFramesWhileFloorOutputIsUnavailable(t *testing.T) {
+	conn, err := openUDP(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	metrics := newControllerMetrics()
+	sender, err := newUDPSender(conn, "192.0.2.55", metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender.resolveSource = func(sourceIP net.IP) (udpSourceBinding, error) {
+		return udpSourceBinding{}, fmt.Errorf("%w: %s", errUDPSourceUnavailable, sourceIP)
+	}
+	frames := &latestFrameBuffer{}
+	frames.update(&recordingpb.FrameRecord{
+		Sequence: 1,
+		Width:    floor.GridWidth,
+		Height:   floor.GridHeight,
+		Tiles:    []*recordingpb.TileState{{X: 0, Y: 0, R: 1}},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		presentationLoop(ctx, config{RefreshFPS: 500}, sender, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4626}, &controllerState{sensorState: make(map[sensorKey]bool)}, frames, metrics, newDuplexHub(config{}))
+		close(done)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+
+	if metrics.presentedFrames.Load() != 0 {
+		t.Fatalf("presented frames = %d, want 0 while physical output is unavailable", metrics.presentedFrames.Load())
+	}
+	if metrics.udpSendErrors.Load() == 0 {
+		t.Fatal("expected failed physical output to be counted")
 	}
 }
 

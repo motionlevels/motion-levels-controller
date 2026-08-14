@@ -65,6 +65,15 @@ func controllerMetricsHandler(cfg config, metrics *controllerMetrics) http.Handl
 		p.metric("motion_levels_controller_game_frame_age_seconds", "Age of the latest frame received from the game engine.", "gauge", frameAge)
 		p.metric("motion_levels_controller_engine_fade_ratio", "Current safety fade from live frame (0) to black (1).", "gauge", status.EngineFadeAmount)
 		p.metric("motion_levels_controller_udp_send_errors_total", "UDP floor output send errors.", "counter", status.UDPErrorCount)
+		p.metric("motion_levels_controller_floor_source_assigned", "Whether the exact configured floor source is currently assigned to an active interface; always 1 when no source is configured.", "gauge", boolNumber(status.UDPSourceAssigned))
+		p.metric("motion_levels_controller_floor_transport_status_known", "Whether at least one floor UDP output attempt has established transport status.", "gauge", boolNumber(status.UDPTransportKnown))
+		p.metric("motion_levels_controller_floor_transport_available", "Whether the most recent floor UDP output attempt succeeded.", "gauge", boolNumber(status.UDPTransportReady))
+		p.metric("motion_levels_controller_floor_source_resolution_attempts_total", "Attempts to acquire the exact configured floor UDP source.", "counter", status.UDPResolveRuns)
+		lastUDPSuccessTimestamp := 0.0
+		if sent := metrics.lastUDPSuccessUnixNano.Load(); sent > 0 {
+			lastUDPSuccessTimestamp = float64(sent) / float64(time.Second)
+		}
+		p.metric("motion_levels_controller_floor_last_udp_success_timestamp_seconds", "Unix timestamp of the most recent successful floor UDP output, or zero before the first success.", "gauge", lastUDPSuccessTimestamp)
 		p.metric("motion_levels_controller_sync_samples_total", "Frame clock synchronization samples.", "counter", status.Sync.Samples)
 		p.metric("motion_levels_controller_engine_clock_offset_seconds", "Observed engine to controller clock offset.", "gauge", status.Sync.EngineClockOffsetMS/1000)
 		p.metric("motion_levels_controller_present_latency_seconds", "Observed controller presentation latency.", "gauge", status.Sync.PresentLatencyMS/1000)

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -58,6 +59,11 @@ type controllerMetrics struct {
 	presentedFramesWindow  atomic.Uint64
 	actualFPSBits          atomic.Uint64
 	udpSendErrors          atomic.Uint64
+	udpSourceResolveRuns   atomic.Uint64
+	udpSourceAssigned      atomic.Bool
+	udpTransportKnown      atomic.Bool
+	udpTransportAvailable  atomic.Bool
+	lastUDPSuccessUnixNano atomic.Int64
 	lastPresentedUnixNanos atomic.Int64
 	lastGameFrameSequence  atomic.Uint64
 	lastGameFrameUnixNanos atomic.Int64
@@ -111,6 +117,11 @@ type statusMessage struct {
 	ActualFPS         float64
 	RefreshFPS        int
 	UDPErrorCount     uint64
+	UDPSourceAssigned bool
+	UDPTransportKnown bool
+	UDPTransportReady bool
+	UDPResolveRuns    uint64
+	LastUDPSuccessMS  int64
 	GameFrameAgeMS    int64
 	GameFrameSequence uint64
 	GameEngineOnline  bool
@@ -196,13 +207,13 @@ func run(ctx context.Context, cfg config) error {
 		return err
 	}
 	defer conn.Close()
-	sender, err := newUDPSender(conn, cfg.FloorSourceIP)
+	metrics := newControllerMetrics()
+	sender, err := newUDPSender(conn, cfg.FloorSourceIP, metrics)
 	if err != nil {
 		return err
 	}
 
 	broadcastAddr := &net.UDPAddr{IP: net.ParseIP(cfg.BroadcastIP), Port: cfg.BroadcastPort}
-	metrics := newControllerMetrics()
 	pressureStreams := &pressureStreamHub{clients: make(map[*pressureStreamClient]bool)}
 	duplex := newDuplexHub(cfg)
 	state := &controllerState{sensorState: make(map[sensorKey]bool)}
@@ -259,26 +270,62 @@ func setBroadcast(conn *net.UDPConn) error {
 }
 
 type udpSender struct {
-	conn    *net.UDPConn
-	packet  *ipv4.PacketConn
-	control *ipv4.ControlMessage
+	conn          *net.UDPConn
+	packet        *ipv4.PacketConn
+	sourceIP      net.IP
+	metrics       *controllerMetrics
+	retryInterval time.Duration
+	now           func() time.Time
+	resolveSource func(net.IP) (udpSourceBinding, error)
+
+	mu                sync.Mutex
+	binding           *udpSourceBinding
+	nextResolve       time.Time
+	lastResolveError  error
+	availabilityKnown bool
+	available         bool
 }
 
-func newUDPSender(conn *net.UDPConn, sourceIPValue string) (*udpSender, error) {
+type udpSourceBinding struct {
+	control       *ipv4.ControlMessage
+	interfaceName string
+}
+
+var errUDPSourceUnavailable = errors.New("configured floor UDP source is unavailable")
+
+func newUDPSender(conn *net.UDPConn, sourceIPValue string, metrics *controllerMetrics) (*udpSender, error) {
 	sourceIPValue = strings.TrimSpace(sourceIPValue)
 	if sourceIPValue == "" {
-		return &udpSender{conn: conn}, nil
+		if metrics != nil {
+			metrics.udpSourceAssigned.Store(true)
+		}
+		return &udpSender{conn: conn, metrics: metrics, now: time.Now}, nil
 	}
 
 	sourceIP := net.ParseIP(sourceIPValue)
 	if sourceIP == nil || sourceIP.To4() == nil {
 		return nil, fmt.Errorf("floor UDP source %q is not a valid IPv4 address", sourceIPValue)
 	}
+	return &udpSender{
+		conn:          conn,
+		packet:        ipv4.NewPacketConn(conn),
+		sourceIP:      sourceIP.To4(),
+		metrics:       metrics,
+		retryInterval: time.Second,
+		now:           time.Now,
+		resolveSource: resolveUDPSource,
+	}, nil
+}
+
+func resolveUDPSource(sourceIP net.IP) (udpSourceBinding, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return nil, fmt.Errorf("list interfaces for floor UDP source: %w", err)
+		return udpSourceBinding{}, fmt.Errorf("list interfaces for floor UDP source: %w", err)
 	}
 	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagUp == 0 {
+			continue
+		}
 		addresses, err := networkInterface.Addrs()
 		if err != nil {
 			continue
@@ -286,9 +333,8 @@ func newUDPSender(conn *net.UDPConn, sourceIPValue string) (*udpSender, error) {
 		for _, address := range addresses {
 			addressIP, _, err := net.ParseCIDR(address.String())
 			if err == nil && addressIP.Equal(sourceIP) {
-				return &udpSender{
-					conn:   conn,
-					packet: ipv4.NewPacketConn(conn),
+				return udpSourceBinding{
+					interfaceName: networkInterface.Name,
 					control: &ipv4.ControlMessage{
 						IfIndex: networkInterface.Index,
 						Src:     sourceIP.To4(),
@@ -297,14 +343,116 @@ func newUDPSender(conn *net.UDPConn, sourceIPValue string) (*udpSender, error) {
 			}
 		}
 	}
-	return nil, fmt.Errorf("floor UDP source %s is not assigned to a local interface", sourceIPValue)
+	return udpSourceBinding{}, fmt.Errorf("%w: %s is not assigned to an active local interface", errUDPSourceUnavailable, sourceIP)
 }
 
 func (s *udpSender) WriteToUDP(packet []byte, addr *net.UDPAddr) (int, error) {
-	if s.control == nil {
-		return s.conn.WriteToUDP(packet, addr)
+	if s.sourceIP == nil {
+		count, err := s.conn.WriteToUDP(packet, addr)
+		s.markWriteResult(err)
+		return count, err
 	}
-	return s.packet.WriteTo(packet, s.control, addr)
+	binding, err := s.currentBinding()
+	if err != nil {
+		s.markUnavailable(err)
+		return 0, err
+	}
+	count, err := s.packet.WriteTo(packet, binding.control, addr)
+	if err != nil {
+		s.invalidateBinding(binding, err)
+		return count, err
+	}
+	s.markAvailable(binding)
+	return count, nil
+}
+
+func (s *udpSender) currentBinding() (*udpSourceBinding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.binding != nil {
+		return s.binding, nil
+	}
+	now := s.now()
+	if now.Before(s.nextResolve) {
+		return nil, s.lastResolveError
+	}
+	if s.metrics != nil {
+		s.metrics.udpSourceResolveRuns.Add(1)
+	}
+	binding, err := s.resolveSource(s.sourceIP)
+	if err != nil {
+		s.nextResolve = now.Add(s.retryInterval)
+		s.lastResolveError = err
+		if s.metrics != nil {
+			s.metrics.udpSourceAssigned.Store(false)
+		}
+		return nil, err
+	}
+	s.binding = &binding
+	s.nextResolve = time.Time{}
+	s.lastResolveError = nil
+	if s.metrics != nil {
+		s.metrics.udpSourceAssigned.Store(true)
+	}
+	return s.binding, nil
+}
+
+func (s *udpSender) invalidateBinding(binding *udpSourceBinding, reason error) {
+	s.mu.Lock()
+	if s.binding == binding {
+		s.binding = nil
+		s.nextResolve = time.Time{}
+		s.lastResolveError = reason
+	}
+	s.mu.Unlock()
+	if s.metrics != nil {
+		s.metrics.udpSourceAssigned.Store(false)
+	}
+	s.markUnavailable(reason)
+}
+
+func (s *udpSender) markWriteResult(err error) {
+	if err != nil {
+		s.markUnavailable(err)
+		return
+	}
+	s.markAvailable(nil)
+}
+
+func (s *udpSender) markAvailable(binding *udpSourceBinding) {
+	if s.metrics != nil {
+		s.metrics.udpTransportKnown.Store(true)
+		s.metrics.udpTransportAvailable.Store(true)
+		s.metrics.lastUDPSuccessUnixNano.Store(s.now().UnixNano())
+	}
+	s.mu.Lock()
+	changed := !s.availabilityKnown || !s.available
+	s.availabilityKnown = true
+	s.available = true
+	s.mu.Unlock()
+	if !changed {
+		return
+	}
+	if binding == nil {
+		log.Printf("floor UDP output available using default route")
+		return
+	}
+	log.Printf("floor UDP output available on configured source interface %s", binding.interfaceName)
+}
+
+func (s *udpSender) markUnavailable(reason error) {
+	if s.metrics != nil {
+		s.metrics.udpTransportKnown.Store(true)
+		s.metrics.udpTransportAvailable.Store(false)
+	}
+	s.mu.Lock()
+	changed := !s.availabilityKnown || s.available
+	s.availabilityKnown = true
+	s.available = false
+	s.mu.Unlock()
+	if changed {
+		log.Printf("floor UDP output unavailable; retaining exact configuration and retrying: %v", reason)
+	}
 }
 
 func readUDP(ctx context.Context, conn *net.UDPConn, state *controllerState, pressureStreams *pressureStreamHub, duplex *duplexHub) {
@@ -383,7 +531,14 @@ func newHTTPHandler(cfg config, metrics *controllerMetrics) http.Handler {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		if _, err := w.Write([]byte(`{"status":"ok"}` + "\n")); err != nil {
+		response := struct {
+			Status      string `json:"status"`
+			FloorOutput string `json:"floor_output"`
+		}{
+			Status:      "ok",
+			FloorOutput: metrics.floorOutputStatus(),
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
 			log.Printf("health response: %v", err)
 		}
 	})
@@ -511,13 +666,15 @@ func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *
 			if !ok {
 				continue
 			}
-			sequence++
 			tiles := tilesFromFrame(frame, state.snapshotPressed())
 			fade := metrics.engineFadeAmount(now, cfg.EngineFadeDelay, cfg.EngineFadeDuration)
 			if fade > 0 {
 				tiles = fadeTiles(tiles, 1-fade)
 			}
-			sendFrame(sender, addr, tiles, metrics)
+			if !sendFrame(sender, addr, tiles, metrics) {
+				continue
+			}
+			sequence++
 			metrics.markPresented(sequence, now, frame)
 			duplex.broadcastPresented(sequence, frame.Sequence, now, frame.Width, frame.Height, tiles, fade)
 		}
@@ -561,12 +718,21 @@ func snapshotStatus(metrics *controllerMetrics, cfg config) statusMessage {
 	if received := metrics.lastGameFrameReceived.Load(); received > 0 {
 		gameFrameAgeMS = now.Sub(time.Unix(0, received)).Milliseconds()
 	}
+	lastUDPSuccessMS := int64(-1)
+	if sent := metrics.lastUDPSuccessUnixNano.Load(); sent > 0 {
+		lastUDPSuccessMS = now.Sub(time.Unix(0, sent)).Milliseconds()
+	}
 	return statusMessage{
 		UptimeSeconds:     int64(now.Sub(metrics.startedAt).Seconds()),
 		PresentedFrames:   metrics.presentedFrames.Load(),
 		ActualFPS:         math.Float64frombits(metrics.actualFPSBits.Load()),
 		RefreshFPS:        cfg.RefreshFPS,
 		UDPErrorCount:     metrics.udpSendErrors.Load(),
+		UDPSourceAssigned: metrics.udpSourceAssigned.Load(),
+		UDPTransportKnown: metrics.udpTransportKnown.Load(),
+		UDPTransportReady: metrics.udpTransportAvailable.Load(),
+		UDPResolveRuns:    metrics.udpSourceResolveRuns.Load(),
+		LastUDPSuccessMS:  lastUDPSuccessMS,
 		GameFrameAgeMS:    gameFrameAgeMS,
 		GameFrameSequence: metrics.lastGameFrameSequence.Load(),
 		GameEngineOnline:  metrics.gameEngineOnline(),
@@ -697,6 +863,16 @@ func (m *controllerMetrics) markUDPError() {
 	m.udpSendErrors.Add(1)
 }
 
+func (m *controllerMetrics) floorOutputStatus() string {
+	if !m.udpTransportKnown.Load() {
+		return "unknown"
+	}
+	if m.udpTransportAvailable.Load() {
+		return "available"
+	}
+	return "unavailable"
+}
+
 func syncLoop(ctx context.Context, sender *udpSender, addr *net.UDPAddr, metrics *controllerMetrics) {
 	sendSync(sender, addr, metrics)
 	ticker := time.NewTicker(5 * time.Second)
@@ -715,13 +891,12 @@ func sendSync(sender *udpSender, addr *net.UDPAddr, metrics *controllerMetrics) 
 	packet := floor.BuildSyncPacket(0, 0, floor.DefaultChannels, []byte{255, 255, 255, 255})
 	if _, err := sender.WriteToUDP(packet, addr); err != nil {
 		metrics.markUDPError()
-		log.Printf("send sync: %v", err)
 		return
 	}
 	log.Printf("sync broadcast sent to %s", addr)
 }
 
-func sendFrame(sender *udpSender, addr *net.UDPAddr, tiles []floor.Tile, metrics *controllerMetrics) {
+func sendFrame(sender *udpSender, addr *net.UDPAddr, tiles []floor.Tile, metrics *controllerMetrics) bool {
 	grid := colorGridFromTiles(tiles)
 	packets := floor.BuildFrame(
 		floor.DefaultControllers,
@@ -738,10 +913,10 @@ func sendFrame(sender *udpSender, addr *net.UDPAddr, tiles []floor.Tile, metrics
 	for _, packet := range packets {
 		if _, err := sender.WriteToUDP(packet, addr); err != nil {
 			metrics.markUDPError()
-			log.Printf("send frame: %v", err)
-			return
+			return false
 		}
 	}
+	return true
 }
 
 func colorGridFromTiles(tiles []floor.Tile) frameGrid {

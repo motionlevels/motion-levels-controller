@@ -11,6 +11,13 @@ The adapter uses the host network for the floor UDP protocol. Venue packaging
 is responsible for its dedicated non-root user, systemd sandbox, writable state
 boundary, and loopback-only management listeners.
 
+Physical floor presence is never an adapter startup prerequisite. When a
+configured floor source IP is not assigned to an active interface, the process
+keeps its HTTP and engine streams online, reports the floor output as
+unavailable, and retries the exact configured source. It does not fall back to
+another interface or emit simulated presentation. Once the source returns, UDP
+output is reacquired without restarting the process.
+
 ## Pinned native build
 
 `scripts/build-native.sh` builds only from the checked-out full Git revision,
@@ -108,12 +115,19 @@ Defaults:
 
 - `GET /health`: process liveness only.
 - `GET /metrics`: bounded Prometheus signals for presentation cadence, engine
-  connectivity and frame age, safety fade, UDP errors, clock/latency/jitter,
-  memory, goroutines, uptime, and build revision.
+  connectivity and frame age, safety fade, exact-source acquisition, floor
+  transport availability, UDP errors, clock/latency/jitter, memory, goroutines,
+  uptime, and build revision.
 - Every other HTTP path returns 404.
 
 The engine exposes the aggregate floor-adapter status for venue and platform
 consumers. Adapter metrics never use controller, session, player, or dynamic
 network identifiers as labels.
+
+`/health` remains HTTP 200 while the floor is absent because it is a process
+liveness contract. Its JSON `floor_output` field is `unknown`, `unavailable`,
+or `available`; hardware readiness must be observed, not used as a deployment
+gate. A frame is counted and returned to the engine as presented only after all
+of its physical UDP packets were sent successfully.
 
 The process handles `SIGINT` and `SIGTERM` for clean shutdown.
