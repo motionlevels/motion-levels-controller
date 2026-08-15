@@ -95,7 +95,7 @@ func TestPhysicalPressureStateFollowsSensorPackets(t *testing.T) {
 	state := &controllerState{sensorState: make(map[sensorKey]bool)}
 	x, y := 4, 9
 
-	physical := floor.LogicalToPhysical(x, y)
+	physical := floor.LogicalToPhysical(x, y, floor.Rotation0)
 	packet := make([]byte, 3+floor.DefaultChannels*171)
 	packet[0] = 0x88
 	packet[1] = byte(physical.Controller)
@@ -109,6 +109,28 @@ func TestPhysicalPressureStateFollowsSensorPackets(t *testing.T) {
 	state.applySensorPacket(packet)
 	if state.snapshotPressed()[y][x] {
 		t.Fatal("udp release did not clear tile")
+	}
+}
+
+func TestPhysicalPressureStateFollowsHalfTurnRotation(t *testing.T) {
+	state := &controllerState{
+		sensorState:   make(map[sensorKey]bool),
+		floorRotation: floor.Rotation180,
+	}
+	x, y := 4, 9
+
+	physical := floor.LogicalToPhysical(x, y, floor.Rotation180)
+	packet := make([]byte, 3+floor.DefaultChannels*171)
+	packet[0] = 0x88
+	packet[1] = byte(physical.Controller)
+	packet[3+physical.Channel*171+physical.Position] = 0xCC
+	events := state.applySensorPacket(packet)
+
+	if !state.snapshotPressed()[y][x] {
+		t.Fatal("rotated UDP press did not mark the corresponding logical tile pressed")
+	}
+	if len(events) != 1 || events[0].X != x || events[0].Y != y {
+		t.Fatalf("rotated pressure event = %+v, want logical coordinates (%d,%d)", events, x, y)
 	}
 }
 
@@ -421,6 +443,19 @@ func TestConfigValidationRejectsInvalidHardwareConfig(t *testing.T) {
 	}
 	if err := cfg.validate(); err == nil {
 		t.Fatal("expected invalid config error")
+	}
+}
+
+func TestConfigValidationRejectsUnsupportedFloorRotation(t *testing.T) {
+	cfg := config{
+		RecvPort:      7800,
+		FloorRotation: 90,
+		BroadcastIP:   "127.0.0.1",
+		BroadcastPort: 4626,
+		RefreshFPS:    50,
+	}
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "floor-rotation") {
+		t.Fatalf("validation error = %v, want unsupported floor rotation", err)
 	}
 }
 

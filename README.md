@@ -107,6 +107,9 @@ Defaults:
 - legacy pressure listener: `127.0.0.1:4202`;
 - protocol-v2 duplex listener: `127.0.0.1:4203`;
 - floor UDP receive socket: `:7800`;
+- logical-to-physical floor rotation: `0` (set `-floor-rotation 180` when the
+  room orientation requires a half turn; LEDs and pressure coordinates rotate
+  together);
 - LED broadcast: `255.255.255.255:4626`;
 - physical refresh: `50fps`;
 - engine disconnect: hold for `2s`, then fade to black over `3s`.

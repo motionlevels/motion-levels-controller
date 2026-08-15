@@ -35,6 +35,7 @@ type config struct {
 	DuplexAddr         string
 	RecvPort           int
 	FloorSourceIP      string
+	FloorRotation      int
 	BroadcastIP        string
 	BroadcastPort      int
 	RefreshFPS         int
@@ -78,9 +79,10 @@ type controllerMetrics struct {
 }
 
 type controllerState struct {
-	mu          sync.RWMutex
-	pressed     [floor.GridHeight][floor.GridWidth]bool
-	sensorState map[sensorKey]bool
+	mu            sync.RWMutex
+	pressed       [floor.GridHeight][floor.GridWidth]bool
+	sensorState   map[sensorKey]bool
+	floorRotation floor.Rotation
 }
 
 type latestFrameBuffer struct {
@@ -161,6 +163,7 @@ func parseConfig() config {
 	flag.StringVar(&cfg.DuplexAddr, "duplex", "127.0.0.1:4203", "TCP address for the protocol-v2 duplex floor stream; empty disables")
 	flag.IntVar(&cfg.RecvPort, "recv-port", 7800, "UDP port for tile handshake/sensor packets")
 	flag.StringVar(&cfg.FloorSourceIP, "floor-source-ip", os.Getenv("MOTION_LEVELS_FLOOR_SOURCE_IP"), "local IPv4 source address for floor UDP output; empty uses the default route")
+	flag.IntVar(&cfg.FloorRotation, "floor-rotation", 0, "logical-to-physical floor rotation in degrees (0 or 180)")
 	flag.StringVar(&cfg.BroadcastIP, "broadcast-ip", "255.255.255.255", "UDP broadcast IP for LED packets")
 	flag.IntVar(&cfg.BroadcastPort, "broadcast-port", 4626, "UDP broadcast port for LED packets")
 	flag.IntVar(&cfg.RefreshFPS, "refresh-fps", 50, "floor-adapter physical UDP refresh rate")
@@ -185,6 +188,9 @@ func (c config) validate() error {
 		if parsed := net.ParseIP(value); parsed == nil || parsed.To4() == nil {
 			errs = append(errs, fmt.Errorf("floor-source-ip must be a valid IPv4 address"))
 		}
+	}
+	if !floor.IsSupportedRotation(c.FloorRotation) {
+		errs = append(errs, fmt.Errorf("floor-rotation must be 0 or 180"))
 	}
 	if c.EngineFadeDelay < 0 {
 		errs = append(errs, fmt.Errorf("engine-fade-delay must be non-negative"))
@@ -216,7 +222,10 @@ func run(ctx context.Context, cfg config) error {
 	broadcastAddr := &net.UDPAddr{IP: net.ParseIP(cfg.BroadcastIP), Port: cfg.BroadcastPort}
 	pressureStreams := &pressureStreamHub{clients: make(map[*pressureStreamClient]bool)}
 	duplex := newDuplexHub(cfg)
-	state := &controllerState{sensorState: make(map[sensorKey]bool)}
+	state := &controllerState{
+		sensorState:   make(map[sensorKey]bool),
+		floorRotation: floor.Rotation(cfg.FloorRotation),
+	}
 	frames := &latestFrameBuffer{}
 	log.Printf("config: %s", cfg)
 
@@ -671,7 +680,7 @@ func presentationLoop(ctx context.Context, cfg config, sender *udpSender, addr *
 			if fade > 0 {
 				tiles = fadeTiles(tiles, 1-fade)
 			}
-			if !sendFrame(sender, addr, tiles, metrics) {
+			if !sendFrame(sender, addr, tiles, floor.Rotation(cfg.FloorRotation), metrics) {
 				continue
 			}
 			sequence++
@@ -896,14 +905,14 @@ func sendSync(sender *udpSender, addr *net.UDPAddr, metrics *controllerMetrics) 
 	log.Printf("sync broadcast sent to %s", addr)
 }
 
-func sendFrame(sender *udpSender, addr *net.UDPAddr, tiles []floor.Tile, metrics *controllerMetrics) bool {
+func sendFrame(sender *udpSender, addr *net.UDPAddr, tiles []floor.Tile, rotation floor.Rotation, metrics *controllerMetrics) bool {
 	grid := colorGridFromTiles(tiles)
 	packets := floor.BuildFrame(
 		floor.DefaultControllers,
 		floor.DefaultChannels,
 		floor.DefaultLEDsPerChannel,
 		func(controller, channel, position int) floor.RGB {
-			x, y := floor.PhysicalToLogical(controller, channel, position)
+			x, y := floor.PhysicalToLogical(controller, channel, position, rotation)
 			if !floor.InLogicalBounds(x, y) {
 				return floor.Black
 			}
@@ -1084,7 +1093,7 @@ func (s *controllerState) applySensorPacket(packet []byte) []pressEvent {
 			s.sensorState[key] = pressed
 			s.mu.Unlock()
 
-			x, y := floor.PhysicalToLogical(controller, channel, position)
+			x, y := floor.PhysicalToLogical(controller, channel, position, s.floorRotation)
 			if !floor.InLogicalBounds(x, y) {
 				continue
 			}
@@ -1134,5 +1143,5 @@ func (s *controllerState) snapshotPressed() [floor.GridHeight][floor.GridWidth]b
 }
 
 func (c config) String() string {
-	return fmt.Sprintf("http=%s frames=%s input-events=%s duplex=%s refresh=%dfps udp=:%d floor-source-ip=%s broadcast=%s:%d fade=%s+%s", c.HTTPAddr, c.FrameAddr, c.InputAddr, c.DuplexAddr, c.RefreshFPS, c.RecvPort, c.FloorSourceIP, c.BroadcastIP, c.BroadcastPort, c.EngineFadeDelay, c.EngineFadeDuration)
+	return fmt.Sprintf("http=%s frames=%s input-events=%s duplex=%s refresh=%dfps udp=:%d floor-source-ip=%s floor-rotation=%d broadcast=%s:%d fade=%s+%s", c.HTTPAddr, c.FrameAddr, c.InputAddr, c.DuplexAddr, c.RefreshFPS, c.RecvPort, c.FloorSourceIP, c.FloorRotation, c.BroadcastIP, c.BroadcastPort, c.EngineFadeDelay, c.EngineFadeDuration)
 }
