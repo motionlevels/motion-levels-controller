@@ -172,3 +172,22 @@ make native-verify
 `make check` runs formatting checks, the race-enabled test suite, `go vet`, and a
 static Linux/amd64 build. The native build embeds the exact full Git revision and
 emits a binary, SHA-256 sidecar, and metadata document under `dist/`.
+
+## Nix and NixOS module
+
+This repository exposes a standard Nix Flake with package and NixOS module definitions:
+
+- **Package**: `packages.${system}.default` / `packages.${system}.motion-levels-controller`
+- **NixOS Module**: `nixosModules.default` / `nixosModules.motion-levels-floor-controller`
+
+Example NixOS usage in downstream venue hosts:
+
+```nix
+{
+  services.motion-levels-floor-controller = {
+    enable = true;
+    floorSourceIP = "192.168.50.10";
+    floorRotation = 0; # or 180
+  };
+}
+```
