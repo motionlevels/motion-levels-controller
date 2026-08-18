@@ -64,6 +64,8 @@ type pressureChange struct {
 	Pressed bool
 }
 
+const historyMinutes = 60
+
 type TileStats struct {
 	Presses            uint64
 	PressedDurationSec float64
@@ -84,11 +86,41 @@ type pressureStore struct {
 	tilePresses           [floor.TileCount]uint64
 	tilePressedDurationNs [floor.TileCount]uint64
 	tilePressedSince      [floor.TileCount]int64
+
+	lastBucketMinute int64
+	minuteBuckets    [historyMinutes][floor.TileCount]uint32
+	minuteDwellNs    [historyMinutes][floor.TileCount]uint32
+
+	subscribers map[chan struct{}]struct{}
+}
+
+func (s *pressureStore) advanceBucketsLocked(minute int64) {
+	if s.lastBucketMinute == 0 {
+		s.lastBucketMinute = minute
+		return
+	}
+	if minute <= s.lastBucketMinute {
+		return
+	}
+	gap := int(minute - s.lastBucketMinute)
+	if gap > historyMinutes {
+		gap = historyMinutes
+	}
+	for i := 1; i <= gap; i++ {
+		idx := (s.lastBucketMinute + int64(i)) % historyMinutes
+		s.minuteBuckets[idx] = [floor.TileCount]uint32{}
+		s.minuteDwellNs[idx] = [floor.TileCount]uint32{}
+	}
+	s.lastBucketMinute = minute
 }
 
 func (s *pressureStore) apply(changes []pressureChange, observedAt time.Time) (PressureSnapshot, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	minute := observedAt.Unix() / 60
+	s.advanceBucketsLocked(minute)
+	bIdx := minute % historyMinutes
+
 	changed := false
 	for _, change := range changes {
 		if !floor.InLogicalBounds(change.X, change.Y) {
@@ -103,13 +135,16 @@ func (s *pressureStore) apply(changes []pressureChange, observedAt time.Time) (P
 		if change.Pressed {
 			s.bits[index/8] |= mask
 			s.tilePresses[index]++
+			s.minuteBuckets[bIdx][index]++
 			s.tilePressedSince[index] = observedAt.UnixNano()
 			s.activePressedTiles++
 		} else {
 			s.bits[index/8] &^= mask
 			if start := s.tilePressedSince[index]; start > 0 {
 				if observedAt.UnixNano() > start {
-					s.tilePressedDurationNs[index] += uint64(observedAt.UnixNano() - start)
+					delta := uint64(observedAt.UnixNano() - start)
+					s.tilePressedDurationNs[index] += delta
+					s.minuteDwellNs[bIdx][index] += uint32(delta)
 				}
 				s.tilePressedSince[index] = 0
 			}
@@ -124,6 +159,13 @@ func (s *pressureStore) apply(changes []pressureChange, observedAt time.Time) (P
 	}
 	s.sequence++
 	s.observedAt = observedAt
+
+	for ch := range s.subscribers {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 	return s.snapshotLocked(), true
 }
 
@@ -141,7 +183,12 @@ func (s *pressureStore) snapshotLocked() PressureSnapshot {
 	}
 }
 
-func (s *pressureStore) statsSnapshot(now time.Time) FloorStatsSnapshot {
+func (s *pressureStore) statsSnapshot(now time.Time, windowMinutes int) FloorStatsSnapshot {
+	s.mu.Lock()
+	minute := now.Unix() / 60
+	s.advanceBucketsLocked(minute)
+	s.mu.Unlock()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -149,17 +196,74 @@ func (s *pressureStore) statsSnapshot(now time.Time) FloorStatsSnapshot {
 	snapshot.ActivePressedTiles = s.activePressedTiles
 	nowNanos := now.UnixNano()
 
+	if windowMinutes <= 0 || windowMinutes > historyMinutes {
+		// Lifetime
+		for index := 0; index < floor.TileCount; index++ {
+			durationNs := s.tilePressedDurationNs[index]
+			if start := s.tilePressedSince[index]; start > 0 && nowNanos > start {
+				durationNs += uint64(nowNanos - start)
+			}
+			snapshot.Tiles[index] = TileStats{
+				Presses:            s.tilePresses[index],
+				PressedDurationSec: float64(durationNs) / 1e9,
+			}
+		}
+		return snapshot
+	}
+
+	// Windowed (e.g. 5m, 15m)
 	for index := 0; index < floor.TileCount; index++ {
-		durationNs := s.tilePressedDurationNs[index]
+		var count uint32
+		var dwellNs uint64
+		for w := 0; w < windowMinutes; w++ {
+			bIdx := (minute - int64(w)) % historyMinutes
+			if bIdx < 0 {
+				bIdx += historyMinutes
+			}
+			count += s.minuteBuckets[bIdx][index]
+			dwellNs += uint64(s.minuteDwellNs[bIdx][index])
+		}
 		if start := s.tilePressedSince[index]; start > 0 && nowNanos > start {
-			durationNs += uint64(nowNanos - start)
+			dwellNs += uint64(nowNanos - start)
 		}
 		snapshot.Tiles[index] = TileStats{
-			Presses:            s.tilePresses[index],
-			PressedDurationSec: float64(durationNs) / 1e9,
+			Presses:            uint64(count),
+			PressedDurationSec: float64(dwellNs) / 1e9,
 		}
 	}
 	return snapshot
+}
+
+func (s *pressureStore) resetStats() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tilePresses = [floor.TileCount]uint64{}
+	s.tilePressedDurationNs = [floor.TileCount]uint64{}
+	s.minuteBuckets = [historyMinutes][floor.TileCount]uint32{}
+	s.minuteDwellNs = [historyMinutes][floor.TileCount]uint32{}
+	s.lastBucketMinute = 0
+	for ch := range s.subscribers {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (s *pressureStore) subscribe() (<-chan struct{}, func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.subscribers == nil {
+		s.subscribers = make(map[chan struct{}]struct{})
+	}
+	ch := make(chan struct{}, 1)
+	s.subscribers[ch] = struct{}{}
+	unsubscribe := func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.subscribers, ch)
+	}
+	return ch, unsubscribe
 }
 
 func replaceLatest[T any](channel chan T, value T) {

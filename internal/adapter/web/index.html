@@ -47,8 +47,15 @@
       .controls {
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: 5px;
         pointer-events: auto;
+      }
+
+      .divider {
+        width: 1px;
+        height: 16px;
+        background: rgba(255, 255, 255, 0.18);
+        margin: 0 3px;
       }
 
       .btn-mode {
@@ -72,6 +79,18 @@
         background: rgba(54, 214, 107, 0.2);
         border-color: #36d66b;
         color: #36d66b;
+      }
+
+      .btn-win.active {
+        background: rgba(59, 130, 246, 0.25);
+        border-color: #3b82f6;
+        color: #60a5fa;
+      }
+
+      .btn-reset:hover {
+        background: rgba(239, 68, 68, 0.25);
+        border-color: #ef4444;
+        color: #f87171;
       }
 
       #status {
@@ -207,6 +226,12 @@
           <button id="mode-steps" class="btn-mode" title="Step count heatmap">Steps</button>
           <button id="mode-dwell" class="btn-mode" title="Dwell duration heatmap">Dwell</button>
           <button id="mode-channels" class="btn-mode" title="Hardware channel mapping">Channels</button>
+          <div class="divider"></div>
+          <button id="win-5m" class="btn-mode btn-win active" title="Rolling last 5 minutes">5m</button>
+          <button id="win-15m" class="btn-mode btn-win" title="Rolling last 15 minutes">15m</button>
+          <button id="win-all" class="btn-mode btn-win" title="All-time lifetime stats">All</button>
+          <button id="btn-reset" class="btn-mode btn-reset" title="Reset session statistics">Reset</button>
+          <div class="divider"></div>
           <button id="fullscreen" type="button" aria-label="Toggle fullscreen" aria-pressed="false" title="Fullscreen">
             <svg class="fullscreen-icon enter" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M8 8 4 4" />
@@ -252,11 +277,11 @@
       const tiles = new Map();
       const activePointers = new Map();
       let currentMode = "live"; // "live", "steps", "dwell", "channels"
+      let currentWindow = 5; // 5, 15, 0
       let currentPressureBits = new Uint8Array(64);
       let currentRGB = new Uint8Array(16 * 32 * 3);
-      let tileStats = [];
+      let currentStatsData = null;
       let orientation = "";
-      let latestStatus = null;
 
       const channelColors = [
         "#3b82f6", "#10b981", "#f59e0b", "#ef4444",
@@ -296,9 +321,18 @@
 
       function setMode(mode) {
         currentMode = mode;
-        document.querySelectorAll(".btn-mode").forEach(btn => btn.classList.remove("active"));
-        document.getElementById(`mode-${mode}`).classList.add("active");
-        board.className = `mode-${mode}`;
+        ["live", "steps", "dwell", "channels"].forEach(m => {
+          document.getElementById(`mode-${m}`).classList.toggle("active", m === mode);
+        });
+        board.className = mode === "steps" || mode === "dwell" ? "mode-heatmaps" : mode === "channels" ? "mode-channels" : "";
+        renderBoard();
+      }
+
+      function setWindow(w) {
+        currentWindow = w;
+        document.getElementById("win-5m").classList.toggle("active", w === 5);
+        document.getElementById("win-15m").classList.toggle("active", w === 15);
+        document.getElementById("win-all").classList.toggle("active", w === 0);
         renderBoard();
       }
 
@@ -307,11 +341,30 @@
       document.getElementById("mode-dwell").onclick = () => setMode("dwell");
       document.getElementById("mode-channels").onclick = () => setMode("channels");
 
+      document.getElementById("win-5m").onclick = () => setWindow(5);
+      document.getElementById("win-15m").onclick = () => setWindow(15);
+      document.getElementById("win-all").onclick = () => setWindow(0);
+
+      document.getElementById("btn-reset").onclick = async () => {
+        if (confirm("Reset current floor session step and dwell counters?")) {
+          await fetch("/stats/reset", { method: "POST" });
+          fetchState();
+        }
+      };
+
+      function getEffectiveStats() {
+        if (!currentStatsData) return [];
+        if (currentWindow === 5 && currentStatsData.tile_stats_5m) return currentStatsData.tile_stats_5m;
+        if (currentWindow === 15 && currentStatsData.tile_stats_15m) return currentStatsData.tile_stats_15m;
+        return currentStatsData.tile_stats || [];
+      }
+
       function renderBoard() {
+        const stats = getEffectiveStats();
         let maxSteps = 1;
         let maxDwell = 1;
-        if (tileStats.length === width * height) {
-          for (const s of tileStats) {
+        if (stats.length === width * height) {
+          for (const s of stats) {
             if (s.presses > maxSteps) maxSteps = s.presses;
             if (s.duration > maxDwell) maxDwell = s.duration;
           }
@@ -335,14 +388,18 @@
               tile.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
               label.textContent = "";
             } else if (currentMode === "steps") {
-              const stat = tileStats[idx] || { presses: 0 };
+              const stat = stats[idx] || { presses: 0 };
               const ratio = Math.min(1, stat.presses / maxSteps);
-              tile.style.backgroundColor = `rgba(239, 68, 68, ${0.1 + ratio * 0.9})`;
+              tile.style.backgroundColor = stat.presses > 0
+                ? `rgba(239, 68, 68, ${0.15 + ratio * 0.85})`
+                : "#111827";
               label.textContent = stat.presses > 0 ? stat.presses : "";
             } else if (currentMode === "dwell") {
-              const stat = tileStats[idx] || { duration: 0 };
+              const stat = stats[idx] || { duration: 0 };
               const ratio = Math.min(1, stat.duration / maxDwell);
-              tile.style.backgroundColor = `rgba(59, 130, 246, ${0.1 + ratio * 0.9})`;
+              tile.style.backgroundColor = stat.duration > 0
+                ? `rgba(59, 130, 246, ${0.15 + ratio * 0.85})`
+                : "#111827";
               label.textContent = stat.duration > 0 ? `${stat.duration.toFixed(1)}s` : "";
             } else if (currentMode === "channels") {
               const channel = y < 16 ? Math.floor(x / 4) : Math.floor(x / 4) + 4;
@@ -354,7 +411,7 @@
       }
 
       function updateStatus(state) {
-        latestStatus = state;
+        currentStatsData = state;
         statusEl.className = state.engine_connected ? "live" : "live";
         const parts = [
           `${state.fps || 50} FPS`,
@@ -378,9 +435,6 @@
             currentRGB[i] = raw.charCodeAt(i);
           }
         }
-        if (state.tile_stats) {
-          tileStats = state.tile_stats;
-        }
         renderBoard();
       }
 
@@ -391,7 +445,6 @@
         };
         eventSource.onerror = () => {
           statusEl.className = "error";
-          // Fallback to polling /state if SSE is disconnected
           fetchState();
         };
         eventSource.addEventListener("state", (event) => {
@@ -403,7 +456,7 @@
 
       async function fetchState() {
         try {
-          const res = await fetch("/state");
+          const res = await fetch(`/state?window=${currentWindow}`);
           if (res.ok) {
             const data = await res.json();
             updateStatus(data);
@@ -486,7 +539,7 @@
       window.addEventListener("resize", applyOrientation);
       window.addEventListener("orientationchange", applyOrientation);
       connectEvents();
-      setInterval(fetchState, 1000); // Background heartbeat poll
+      setInterval(fetchState, 2000);
     </script>
   </body>
 </html>

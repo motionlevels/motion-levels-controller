@@ -224,24 +224,46 @@ type fullStateResponse struct {
 	ActivePressedTiles uint32             `json:"active_pressed_tiles"`
 	PressureBase64     string             `json:"pressure_base64"`
 	RGBBase64          string             `json:"rgb_base64"`
+	WindowMinutes      int                `json:"window_minutes"`
 	TileStats          []tileStatResponse `json:"tile_stats"`
+	TileStats5m        []tileStatResponse `json:"tile_stats_5m"`
+	TileStats15m       []tileStatResponse `json:"tile_stats_15m"`
 }
 
-func buildStateResponse(now time.Time, cfg Config, status *runtimeStatus, pressure *pressureStore, frames *frameStore) fullStateResponse {
+func buildStateResponse(now time.Time, cfg Config, status *runtimeStatus, pressure *pressureStore, frames *frameStore, windowMinutes int) fullStateResponse {
 	snapshot := status.snapshot(now, cfg)
 	var pressureBase64 string
 	var activePressedTiles uint32
-	var tileStats []tileStatResponse
+	var tileStats, tileStats5m, tileStats15m []tileStatResponse
 	if pressure != nil {
 		pressureSnap := pressure.snapshot()
 		pressureBase64 = base64.StdEncoding.EncodeToString(pressureSnap.Bits[:])
-		floorStats := pressure.statsSnapshot(now)
+
+		floorStats := pressure.statsSnapshot(now, windowMinutes)
 		activePressedTiles = floorStats.ActivePressedTiles
 		tileStats = make([]tileStatResponse, floor.TileCount)
 		for i := 0; i < floor.TileCount; i++ {
 			tileStats[i] = tileStatResponse{
 				Presses:  floorStats.Tiles[i].Presses,
 				Duration: floorStats.Tiles[i].PressedDurationSec,
+			}
+		}
+
+		floorStats5m := pressure.statsSnapshot(now, 5)
+		tileStats5m = make([]tileStatResponse, floor.TileCount)
+		for i := 0; i < floor.TileCount; i++ {
+			tileStats5m[i] = tileStatResponse{
+				Presses:  floorStats5m.Tiles[i].Presses,
+				Duration: floorStats5m.Tiles[i].PressedDurationSec,
+			}
+		}
+
+		floorStats15m := pressure.statsSnapshot(now, 15)
+		tileStats15m = make([]tileStatResponse, floor.TileCount)
+		for i := 0; i < floor.TileCount; i++ {
+			tileStats15m[i] = tileStatResponse{
+				Presses:  floorStats15m.Tiles[i].Presses,
+				Duration: floorStats15m.Tiles[i].PressedDurationSec,
 			}
 		}
 	}
@@ -261,7 +283,10 @@ func buildStateResponse(now time.Time, cfg Config, status *runtimeStatus, pressu
 		ActivePressedTiles: activePressedTiles,
 		PressureBase64:     pressureBase64,
 		RGBBase64:          rgbBase64,
+		WindowMinutes:      windowMinutes,
 		TileStats:          tileStats,
+		TileStats5m:        tileStats5m,
+		TileStats15m:       tileStats15m,
 	}
 }
 
@@ -349,7 +374,7 @@ func newHTTPHandler(cfg Config, status *runtimeStatus, pressure *pressureStore, 
 			p.metric("motion_levels_controller_channel_healthy", "Whether this hardware channel was observed within the floor-seen window.", "gauge", boolNumber(chHealthy), "channel", chStr)
 		}
 		if pressure != nil {
-			floorStats := pressure.statsSnapshot(now)
+			floorStats := pressure.statsSnapshot(now, 0)
 			p.metric("motion_levels_controller_active_pressed_tiles", "Number of currently pressed tiles on the physical floor.", "gauge", floorStats.ActivePressedTiles)
 			for y := 0; y < floor.GridHeight; y++ {
 				yStr := strconv.Itoa(y)
@@ -374,7 +399,13 @@ func newHTTPHandler(cfg Config, status *runtimeStatus, pressure *pressureStore, 
 	mux.HandleFunc("/state", func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
-		res := buildStateResponse(time.Now(), cfg, status, pressure, frames)
+		window := 5
+		if q := request.URL.Query().Get("window"); q != "" {
+			if n, err := strconv.Atoi(q); err == nil && n >= 0 {
+				window = n
+			}
+		}
+		res := buildStateResponse(time.Now(), cfg, status, pressure, frames, window)
 		_ = json.NewEncoder(w).Encode(res)
 	})
 
@@ -389,7 +420,7 @@ func newHTTPHandler(cfg Config, status *runtimeStatus, pressure *pressureStore, 
 		w.Header().Set("Connection", "keep-alive")
 
 		send := func() error {
-			res := buildStateResponse(time.Now(), cfg, status, pressure, frames)
+			res := buildStateResponse(time.Now(), cfg, status, pressure, frames, 5)
 			data, err := json.Marshal(res)
 			if err != nil {
 				return err
@@ -405,12 +436,23 @@ func newHTTPHandler(cfg Config, status *runtimeStatus, pressure *pressureStore, 
 			return
 		}
 
-		ticker := time.NewTicker(50 * time.Millisecond) // 20 fps SSE stream
+		var eventCh <-chan struct{}
+		if pressure != nil {
+			ch, unsub := pressure.subscribe()
+			defer unsub()
+			eventCh = ch
+		}
+
+		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-request.Context().Done():
 				return
+			case <-eventCh:
+				if err := send(); err != nil {
+					return
+				}
 			case <-ticker.C:
 				if err := send(); err != nil {
 					return
@@ -442,6 +484,17 @@ func newHTTPHandler(cfg Config, status *runtimeStatus, pressure *pressureStore, 
 					hub.publishPressure(snapshot)
 				}
 			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("/stats/reset", func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pressure != nil {
+			pressure.resetStats()
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})

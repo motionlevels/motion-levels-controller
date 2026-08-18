@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/motionlevels/motion-levels-controller/internal/floor"
 )
 
 func TestHTTPHandlerWebDashboardAndEndpoints(t *testing.T) {
@@ -64,6 +66,33 @@ func TestHTTPHandlerWebDashboardAndEndpoints(t *testing.T) {
 	}
 	if !pressure.snapshot().IsPressed(2, 4) {
 		t.Fatal("simulated press was not recorded in pressureStore")
+	}
+
+	// GET /state?window=15 returns window-specific data
+	winReq := httptest.NewRequest(http.MethodGet, "/state?window=15", nil)
+	winResp := httptest.NewRecorder()
+	handler.ServeHTTP(winResp, winReq)
+	if winResp.Code != http.StatusOK {
+		t.Fatalf("GET /state?window=15 status=%d", winResp.Code)
+	}
+	var winState fullStateResponse
+	if err := json.Unmarshal(winResp.Body.Bytes(), &winState); err != nil {
+		t.Fatalf("unmarshal state response: %v", err)
+	}
+	if winState.WindowMinutes != 15 || len(winState.TileStats15m) != floor.TileCount {
+		t.Fatalf("unexpected window state response: %+v", winState)
+	}
+
+	// POST /stats/reset clears stats
+	resetReq := httptest.NewRequest(http.MethodPost, "/stats/reset", nil)
+	resetResp := httptest.NewRecorder()
+	handler.ServeHTTP(resetResp, resetReq)
+	if resetResp.Code != http.StatusNoContent {
+		t.Fatalf("POST /stats/reset status=%d, want 204", resetResp.Code)
+	}
+	idx := 4*floor.GridWidth + 2
+	if pressure.statsSnapshot(time.Now(), 0).Tiles[idx].Presses != 0 {
+		t.Fatal("stats were not cleared after /stats/reset")
 	}
 }
 

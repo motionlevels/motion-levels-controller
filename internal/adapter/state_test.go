@@ -80,7 +80,7 @@ func TestPressureStorePublishesCanonicalSnapshot(t *testing.T) {
 
 func TestPressureStoreTracksTilePressesAndDuration(t *testing.T) {
 	store := &pressureStore{observedAt: time.Unix(1000, 0)}
-	initStats := store.statsSnapshot(time.Unix(1000, 0))
+	initStats := store.statsSnapshot(time.Unix(1000, 0), 0)
 	if initStats.ActivePressedTiles != 0 {
 		t.Fatalf("initial active tiles = %d, want 0", initStats.ActivePressedTiles)
 	}
@@ -94,7 +94,7 @@ func TestPressureStoreTracksTilePressesAndDuration(t *testing.T) {
 	store.apply([]pressureChange{{X: 2, Y: 5, Pressed: true}}, time.Unix(1000, 0))
 
 	// Inspect while still pressed at t = 1002.5s
-	midStats := store.statsSnapshot(time.Unix(1002, 500_000_000))
+	midStats := store.statsSnapshot(time.Unix(1002, 500_000_000), 0)
 	if midStats.ActivePressedTiles != 1 {
 		t.Fatalf("active tiles during press = %d, want 1", midStats.ActivePressedTiles)
 	}
@@ -109,7 +109,7 @@ func TestPressureStoreTracksTilePressesAndDuration(t *testing.T) {
 	store.apply([]pressureChange{{X: 2, Y: 5, Pressed: false}}, time.Unix(1003, 0))
 
 	// Inspect after release at t = 1010s
-	releasedStats := store.statsSnapshot(time.Unix(1010, 0))
+	releasedStats := store.statsSnapshot(time.Unix(1010, 0), 0)
 	if releasedStats.ActivePressedTiles != 0 {
 		t.Fatalf("active tiles after release = %d, want 0", releasedStats.ActivePressedTiles)
 	}
@@ -124,11 +124,51 @@ func TestPressureStoreTracksTilePressesAndDuration(t *testing.T) {
 	store.apply([]pressureChange{{X: 2, Y: 5, Pressed: true}}, time.Unix(1010, 0))
 	store.apply([]pressureChange{{X: 2, Y: 5, Pressed: false}}, time.Unix(1012, 0))
 
-	finalStats := store.statsSnapshot(time.Unix(1015, 0))
+	finalStats := store.statsSnapshot(time.Unix(1015, 0), 0)
 	if finalStats.Tiles[idx].Presses != 2 {
 		t.Fatalf("final press count = %d, want 2", finalStats.Tiles[idx].Presses)
 	}
 	if finalStats.Tiles[idx].PressedDurationSec != 5.0 {
 		t.Fatalf("final duration = %v, want 5.0", finalStats.Tiles[idx].PressedDurationSec)
+	}
+}
+
+func TestPressureStoreRollingWindowsAndReset(t *testing.T) {
+	t0 := time.Unix(6000, 0) // Minute 100
+	store := &pressureStore{observedAt: t0}
+	idx := 2*floor.GridWidth + 3
+
+	// First press at minute 100
+	store.apply([]pressureChange{{X: 3, Y: 2, Pressed: true}}, t0)
+	store.apply([]pressureChange{{X: 3, Y: 2, Pressed: false}}, t0.Add(5*time.Second))
+
+	// Second press 8 minutes later (minute 108)
+	t1 := t0.Add(8 * time.Minute)
+	store.apply([]pressureChange{{X: 3, Y: 2, Pressed: true}}, t1)
+	store.apply([]pressureChange{{X: 3, Y: 2, Pressed: false}}, t1.Add(3*time.Second))
+
+	// At minute 108, last 5 minutes (minutes 104..108) should only see the 2nd press
+	snap5m := store.statsSnapshot(t1, 5)
+	if snap5m.Tiles[idx].Presses != 1 {
+		t.Fatalf("5m window presses = %d, want 1", snap5m.Tiles[idx].Presses)
+	}
+
+	// Last 15 minutes (minutes 94..108) should see both presses
+	snap15m := store.statsSnapshot(t1, 15)
+	if snap15m.Tiles[idx].Presses != 2 {
+		t.Fatalf("15m window presses = %d, want 2", snap15m.Tiles[idx].Presses)
+	}
+
+	// Lifetime (window = 0) sees both
+	snapAll := store.statsSnapshot(t1, 0)
+	if snapAll.Tiles[idx].Presses != 2 {
+		t.Fatalf("lifetime presses = %d, want 2", snapAll.Tiles[idx].Presses)
+	}
+
+	// Reset stats
+	store.resetStats()
+	afterReset := store.statsSnapshot(t1, 15)
+	if afterReset.Tiles[idx].Presses != 0 {
+		t.Fatalf("presses after reset = %d, want 0", afterReset.Tiles[idx].Presses)
 	}
 }
