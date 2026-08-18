@@ -27,9 +27,12 @@ func Run(parent context.Context, cfg Config) error {
 	}
 	defer sender.Close()
 
+	notifier := newSystemdNotifier()
+	defer notifier.close()
+
 	engine := &engineServer{cfg: cfg, hub: hub}
 	sensors := &sensorReader{cfg: cfg, pressure: pressure, hub: hub, status: status}
-	output := &outputLoop{cfg: cfg, sender: sender, frames: frames, pressure: pressure, hub: hub, status: status}
+	output := &outputLoop{cfg: cfg, sender: sender, frames: frames, pressure: pressure, hub: hub, status: status, notifier: notifier}
 
 	var wait sync.WaitGroup
 	errCh := make(chan error, 3)
@@ -58,12 +61,15 @@ func Run(parent context.Context, cfg Config) error {
 		status.metricsLoop(ctx.Done())
 	}()
 
+	notifier.ready()
+
 	var runErr error
 	select {
 	case <-parent.Done():
 		runErr = parent.Err()
 	case runErr = <-errCh:
 	}
+	notifier.stopping()
 	cancel()
 	hub.close()
 	wait.Wait()

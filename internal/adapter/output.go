@@ -17,6 +17,7 @@ type outputLoop struct {
 	pressure *pressureStore
 	hub      *engineHub
 	status   *runtimeStatus
+	notifier *systemdNotifier
 }
 
 func (o *outputLoop) run(ctx context.Context) error {
@@ -32,6 +33,8 @@ func (o *outputLoop) run(ctx context.Context) error {
 	defer refresh.Stop()
 	syncTicker := time.NewTicker(o.cfg.SyncInterval)
 	defer syncTicker.Stop()
+	watchdogTicker := time.NewTicker(time.Second)
+	defer watchdogTicker.Stop()
 
 	for {
 		select {
@@ -40,6 +43,8 @@ func (o *outputLoop) run(ctx context.Context) error {
 				log.Printf("final black frame: %v", err)
 			}
 			return nil
+		case <-watchdogTicker.C:
+			o.notifier.watchdog()
 		case <-syncTicker.C:
 			// This goroutine owns every physical UDP write, so a sync packet can
 			// never interleave with the packets of a frame transaction.

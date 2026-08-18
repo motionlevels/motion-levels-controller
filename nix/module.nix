@@ -63,6 +63,12 @@ in
       description = "Floor LED broadcast IPv4 address.";
     };
 
+    watchdogSec = lib.mkOption {
+      type = types.nullOr types.str;
+      default = "10s";
+      description = "Systemd watchdog timeout (null to disable).";
+    };
+
     extraArgs = lib.mkOption {
       type = types.listOf types.str;
       default = [ ];
@@ -77,6 +83,9 @@ in
       wantedBy = [ "multi-user.target" ];
 
       serviceConfig = {
+        Type = "notify";
+        NotifyAccess = "main";
+        WatchdogSec = cfg.watchdogSec;
         ExecStart = lib.escapeShellArgs (
           [
             "${cfg.package}/bin/motion-levels-controller"
