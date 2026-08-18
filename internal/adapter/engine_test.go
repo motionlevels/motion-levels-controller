@@ -112,3 +112,44 @@ func TestEngineSessionRejectsUnexpectedMessage(t *testing.T) {
 		t.Fatal("unexpected engine message did not close the session")
 	}
 }
+
+func TestReplacementEngineInitialOutputCannotReferenceRetiredFrame(t *testing.T) {
+	cfg := DefaultConfig()
+	frames := &frameStore{}
+	pressure := &pressureStore{observedAt: time.Unix(0, 100)}
+	pressureSnapshot, changed := pressure.apply([]pressureChange{{X: 2, Y: 3, Pressed: true}}, time.Unix(0, 200))
+	if !changed {
+		t.Fatal("test pressure did not change")
+	}
+	status := newRuntimeStatus()
+	hub := newEngineHub(cfg, frames, pressure, status)
+	hub.lastOutput = OutputSnapshot{
+		FramesSent:           42,
+		DesiredSequence:      99,
+		DesiredFrameAge:      10 * time.Millisecond,
+		FadeRatio:            0,
+		PhysicalFrameWasSent: true,
+		UDPWriteAvailable:    true,
+	}
+	hub.hasOutput = true
+
+	server, client := net.Pipe()
+	defer client.Close()
+	session := hub.attach(server)
+	defer session.close()
+
+	select {
+	case initial := <-session.output:
+		if initial.FramesSent != 42 || !initial.UDPWriteAvailable {
+			t.Fatalf("transport state was not preserved: %+v", initial)
+		}
+		if initial.DesiredSequence != 0 || initial.DesiredFrameAge != -1 || initial.FadeRatio != 1 || initial.PhysicalFrameWasSent {
+			t.Fatalf("replacement inherited retired frame state: %+v", initial)
+		}
+		if initial.PressureSequence != pressureSnapshot.Sequence || initial.PressureBits != pressureSnapshot.Bits {
+			t.Fatalf("replacement output did not carry canonical pressure: %+v", initial)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement engine did not receive an initial output state")
+	}
+}

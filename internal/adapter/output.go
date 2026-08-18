@@ -18,6 +18,7 @@ type outputLoop struct {
 	hub      *engineHub
 	status   *runtimeStatus
 	notifier *systemdNotifier
+	ready    func()
 }
 
 func (o *outputLoop) run(ctx context.Context) error {
@@ -28,13 +29,21 @@ func (o *outputLoop) run(ctx context.Context) error {
 	if _, err := o.present(time.Now(), true); err != nil {
 		o.status.markUDPError()
 	}
+	if o.ready != nil {
+		o.ready()
+	}
 
 	refresh := time.NewTicker(time.Second / time.Duration(o.cfg.RefreshFPS))
 	defer refresh.Stop()
 	syncTicker := time.NewTicker(o.cfg.SyncInterval)
 	defer syncTicker.Stop()
-	watchdogTicker := time.NewTicker(time.Second)
-	defer watchdogTicker.Stop()
+	var watchdogTicker *time.Ticker
+	var watchdog <-chan time.Time
+	if o.notifier != nil && o.notifier.watchdogInterval > 0 {
+		watchdogTicker = time.NewTicker(o.notifier.watchdogInterval)
+		watchdog = watchdogTicker.C
+		defer watchdogTicker.Stop()
+	}
 
 	for {
 		select {
@@ -43,7 +52,7 @@ func (o *outputLoop) run(ctx context.Context) error {
 				log.Printf("final black frame: %v", err)
 			}
 			return nil
-		case <-watchdogTicker.C:
+		case <-watchdog:
 			o.notifier.watchdog()
 		case <-syncTicker.C:
 			// This goroutine owns every physical UDP write, so a sync packet can
@@ -69,6 +78,11 @@ func (o *outputLoop) present(now time.Time, forceBlack bool) (OutputSnapshot, er
 	if hasFrame && !forceBlack {
 		desiredSequence = frame.Sequence
 		frameAge = now.Sub(frame.ReceivedAt)
+		if frameAge < 0 {
+			// A ticker timestamp can precede a frame received just before this
+			// iteration is handled. Treat that race as a fresh frame, not black.
+			frameAge = 0
+		}
 		fade = float32(frameFadeRatio(frameAge, o.cfg.FrameTimeout, o.cfg.FrameHold, o.cfg.FrameFade))
 		copy(rgb[:], frame.RGB[:])
 		applyFade(rgb[:], 1-float64(fade))

@@ -11,32 +11,36 @@ import (
 	"github.com/motionlevels/motion-levels-controller/internal/floor"
 )
 
-const sensorChannelStride = 171
+const (
+	sensorChannelStride = 171
+	sensorPacketSize    = 3 + floor.DefaultChannels*sensorChannelStride
+)
 
 type sensorReader struct {
 	cfg      Config
 	pressure *pressureStore
 	hub      *engineHub
 	status   *runtimeStatus
+	ready    func()
 
 	lastWarningLog time.Time
 	suppressedLogs int
 }
 
-func (r *sensorReader) logWarning(format string, v ...any) {
+func (r *sensorReader) logWarning(format string, values ...any) {
 	now := time.Now()
-	if now.Sub(r.lastWarningLog) >= time.Second {
-		if r.suppressedLogs > 0 {
-			msg := fmt.Sprintf(format, v...)
-			log.Printf("%s (suppressed %d similar warnings)", msg, r.suppressedLogs)
-			r.suppressedLogs = 0
-		} else {
-			log.Printf(format, v...)
-		}
-		r.lastWarningLog = now
-	} else {
+	if now.Sub(r.lastWarningLog) < time.Second {
 		r.suppressedLogs++
+		return
 	}
+	message := fmt.Sprintf(format, values...)
+	if r.suppressedLogs > 0 {
+		log.Printf("%s (suppressed %d similar warnings)", message, r.suppressedLogs)
+		r.suppressedLogs = 0
+	} else {
+		log.Print(message)
+	}
+	r.lastWarningLog = now
 }
 
 func (r *sensorReader) run(ctx context.Context) error {
@@ -50,6 +54,9 @@ func (r *sensorReader) run(ctx context.Context) error {
 	}
 	defer conn.Close()
 	log.Printf("floor input: %s", conn.LocalAddr())
+	if r.ready != nil {
+		r.ready()
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -75,15 +82,13 @@ func (r *sensorReader) run(ctx context.Context) error {
 			r.status.markFloorPacket(observedAt)
 			log.Printf("floor handshake from %s (%d bytes)", remote, count)
 		case 0x88:
-			changes, channelCount, err := decodeSensorPacket(packet, r.cfg.FloorRotation)
+			changes, err := decodeSensorPacket(packet, r.cfg.FloorRotation)
 			if err != nil {
+				r.status.markInvalidSensorPacket()
 				r.logWarning("invalid floor sensor packet from %s: %v", remote, err)
 				continue
 			}
-			r.status.markFloorPacket(observedAt)
-			for channel := 0; channel < channelCount; channel++ {
-				r.status.markChannelPacket(channel, observedAt)
-			}
+			r.status.markSensorPacket(observedAt)
 			if snapshot, changed := r.pressure.apply(changes, observedAt); changed {
 				r.status.markPressure(snapshot.Sequence)
 				r.hub.publishPressure(snapshot)
@@ -94,22 +99,23 @@ func (r *sensorReader) run(ctx context.Context) error {
 	}
 }
 
-func decodeSensorPacket(packet []byte, rotation floor.Rotation) ([]pressureChange, int, error) {
-	if len(packet) < 3+sensorChannelStride {
-		return nil, 0, fmt.Errorf("sensor packet is %d bytes, want at least %d", len(packet), 3+sensorChannelStride)
+func decodeSensorPacket(packet []byte, rotation floor.Rotation) ([]pressureChange, error) {
+	// This installation's controller emits all eight 171-byte channel blocks in
+	// one aggregate packet. Applying a partial packet would retain stale pressure
+	// for omitted channels, so incomplete packets are rejected as a unit.
+	if len(packet) < sensorPacketSize {
+		return nil, fmt.Errorf("sensor packet is %d bytes, want at least %d", len(packet), sensorPacketSize)
 	}
 	controller := int(packet[1])
 	if controller < 0 || controller >= floor.DefaultControllers {
-		return nil, 0, fmt.Errorf("controller %d is outside configured range", controller)
+		return nil, fmt.Errorf("controller %d is outside configured range", controller)
 	}
 
-	channelCount := min((len(packet)-3)/sensorChannelStride, floor.DefaultChannels)
-	changes := make([]pressureChange, 0, channelCount*floor.DefaultLEDsPerChannel)
-	for channel := 0; channel < channelCount; channel++ {
+	changes := make([]pressureChange, 0, floor.TileCount)
+	for channel := 0; channel < floor.DefaultChannels; channel++ {
 		base := 3 + channel*sensorChannelStride
-		// The vendor packet reserves a 171-byte stride per channel, but this
-		// 16x32 installation has exactly 64 logical sensors per channel. Bytes
-		// outside that physical range are vendor metadata or unused capacity.
+		// The vendor block reserves 171 bytes, while this floor has 64 installed
+		// sensors per channel. Remaining bytes are vendor metadata/capacity.
 		for position := 0; position < floor.DefaultLEDsPerChannel; position++ {
 			value := packet[base+position]
 			var pressed bool
@@ -123,10 +129,10 @@ func decodeSensorPacket(packet []byte, rotation floor.Rotation) ([]pressureChang
 			}
 			x, y := floor.PhysicalToLogical(controller, channel, position, rotation)
 			if !floor.InLogicalBounds(x, y) {
-				return nil, 0, fmt.Errorf("physical coordinate controller=%d channel=%d position=%d mapped outside the logical floor", controller, channel, position)
+				return nil, fmt.Errorf("physical coordinate controller=%d channel=%d position=%d mapped outside the logical floor", controller, channel, position)
 			}
 			changes = append(changes, pressureChange{X: x, Y: y, Pressed: pressed})
 		}
 	}
-	return changes, channelCount, nil
+	return changes, nil
 }

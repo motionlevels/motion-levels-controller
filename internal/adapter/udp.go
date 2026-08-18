@@ -53,6 +53,14 @@ func (o *udpOutput) Write(packet []byte) error {
 		o.markUnavailableLocked(err)
 		return err
 	}
+	if err := conn.SetWriteDeadline(o.now().Add(o.cfg.WriteTimeout)); err != nil {
+		_ = conn.Close()
+		o.conn = nil
+		o.nextResolve = time.Time{}
+		o.lastError = fmt.Errorf("set floor UDP write deadline: %w", err)
+		o.markUnavailableLocked(o.lastError)
+		return o.lastError
+	}
 	if _, err := conn.WriteToUDP(packet, o.dest); err != nil {
 		_ = conn.Close()
 		o.conn = nil
@@ -61,7 +69,7 @@ func (o *udpOutput) Write(packet []byte) error {
 		o.markUnavailableLocked(err)
 		return err
 	}
-	o.status.markUDPAvailable()
+	o.status.markUDPAvailable(o.now())
 	o.markAvailableLocked()
 	return nil
 }

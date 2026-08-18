@@ -1,79 +1,70 @@
 # Motion Levels Floor Controller
 
-This repository contains the small hardware-facing adapter between the Motion
-Levels game engine and the physical 16×32 LED floor.
+A small hardware-facing adapter between the Motion Levels game engine and the
+physical 16×32 LED floor.
 
-It deliberately owns only the hardware boundary:
+It owns only the hardware boundary:
 
 - one local engine connection;
 - one latest packed RGB frame;
 - physical UDP frame and sync transmission;
 - physical pressure parsing and logical-coordinate mapping;
 - a frame-freshness watchdog with hold, fade, and black output;
-- minimal liveness and Prometheus telemetry.
+- a loopback hardware diagnostics page;
+- bounded operational metrics and native/Nix packaging.
 
-Game rules, sessions, players, recordings, kiosk/display lifecycle, platform
-credentials, updates, and venue orchestration belong in other repositories.
+Game rules, product sessions, players, recordings, kiosk lifecycle, platform
+credentials, venue orchestration, and updates belong elsewhere.
 
 ## Runtime model
 
-The engine sends packed row-major RGB frames. The controller keeps only the
-latest valid frame and refreshes the physical floor at 50 fps. Frames do not
-queue: a newer frame replaces an older one.
+The engine sends packed row-major RGB frames. The controller retains only the
+latest valid frame and refreshes the floor at 50 fps. Frames never queue.
 
-Pressure is represented canonically as a 512-bit snapshot rather than as an
-unrecoverable stream of individual transitions. The controller sends the full
-snapshot when an engine connects and whenever pressure changes.
+Pressure is a canonical 512-bit snapshot. A full snapshot is sent when an engine
+connects and whenever pressure changes, so a dropped intermediate update heals
+on the next snapshot.
 
-Only one engine session is active. A new loopback connection replaces the old
-one immediately, invalidates its frame generation, and starts from black until
-the new engine sends its own valid frame. A delayed old connection can never
-publish into the new generation.
+A newer loopback engine connection replaces the previous one, invalidates its
+frame generation, and begins from black until it sends a valid frame.
 
 ## Safety watchdog
 
-Safety depends on locally observed frame age, not TCP connection state.
+Safety uses locally observed frame age, not socket connectivity. With defaults:
 
-The engine should resend its current desired frame periodically even when its
-visual contents have not changed. With the defaults:
-
-1. a frame lease expires after 500 ms without a new valid frame;
-2. the controller holds the last frame for another 2 seconds;
+1. the frame lease expires after 500 ms;
+2. the previous frame is held for 2 seconds;
 3. it fades linearly to black over 3 seconds;
 4. black continues to be physically refreshed.
 
-A frozen engine that leaves its socket open therefore cannot hold a bright stale
-frame indefinitely. The controller also sends black on startup and makes a
-best-effort final black transmission during orderly shutdown.
+The engine should resend its current desired frame even when its visual content
+has not changed. The controller also sends black on startup and attempts a final
+black transaction during orderly shutdown.
 
 ## Engine wire contract
 
-There is one current, unversioned full-duplex TCP contract on
-`127.0.0.1:4201`. Controller and engine revisions are promoted together in one
-atomic venue release, so there is no protocol negotiation or compatibility
-matrix inside the runtime.
+The single unversioned full-duplex TCP contract listens on `127.0.0.1:4201`.
+Controller and engine revisions are promoted in one atomic venue release.
 
-Every message has this fixed header:
+Every message begins with:
 
 ```text
 1 byte  message type
 4 bytes big-endian payload length
-N bytes payload (maximum 4096)
+N bytes payload, maximum 4096
 ```
 
-All integer fields are unsigned big-endian unless stated otherwise.
-
-### Engine → controller: desired frame (`type = 1`)
+### Desired frame, engine → controller (`type = 1`)
 
 ```text
 8 bytes    positive monotonic sequence
-1536 bytes RGB (16 × 32 × 3), row-major, R/G/B order
+1536 bytes RGB, 16 × 32 × 3, row-major R/G/B
 ```
 
-Any other engine message, invalid length, zero sequence, or malformed frame
-closes the connection. Stale sequences are ignored.
+Malformed frames and unexpected message types close the connection. Stale
+sequences are ignored.
 
-### Controller → engine: pressure state (`type = 2`)
+### Pressure state, controller → engine (`type = 2`)
 
 ```text
 8 bytes  pressure sequence
@@ -81,52 +72,80 @@ closes the connection. Stale sequences are ignored.
 64 bytes pressure bits, row-major; bit 0 is tile (0,0)
 ```
 
-### Controller → engine: output state (`type = 3`)
+### Output state, controller → engine (`type = 3`)
 
 ```text
 8 bytes  complete physical frame transactions sent
 8 bytes  desired frame sequence, or zero for black/no frame
-8 bytes  state timestamp in Unix nanoseconds
-8 bytes  desired frame age in milliseconds (signed two's-complement value)
+8 bytes  state Unix nanoseconds
+8 bytes  desired frame age in milliseconds, signed two's complement
 4 bytes  IEEE-754 float32 fade ratio
-1 byte   flags: bit 0 UDP write available, bit 1 floor seen recently,
-         bit 2 this physical frame transaction succeeded
+1 byte   flags: UDP available, floor seen, transaction succeeded
 8 bytes  UDP write error count
 8 bytes  pressure sequence
 64 bytes pressure bits
 ```
 
-Output and pressure use one-element latest-value queues. A slow engine cannot
-block the physical refresh loop. Pressure messages are prioritized.
+Pressure and output use one-element latest-value queues, so a slow engine cannot
+block the physical output loop.
 
 ## Physical floor behavior
 
-The vendor UDP packet encoder and logical/physical wiring map remain isolated in
-`internal/floor`. The supported room orientations are 0° and 180°; LED output
-and pressure input use the same transform.
+The vendor packet encoder and wiring map remain isolated under `internal/floor`.
+Supported room rotations are 0° and 180°, applied consistently to LED output and
+pressure input.
 
-One output goroutine owns all physical writes. Periodic sync packets therefore
-cannot interleave with the start/configuration/RGB/end packets of a frame
-transaction.
+One goroutine owns every physical write, preventing sync packets from
+interleaving with a frame transaction.
 
-When `-floor-source-ip` is configured, the controller uses only that exact IPv4
-source. If it is absent, the process remains online, reports output unavailable,
-and retries. It never falls back to another interface. Once the address returns,
-output is reacquired without restarting the process.
+When `-floor-source-ip` is configured, only that exact local IPv4 address is
+used. If absent, the service remains online and retries without falling back to
+another interface.
 
-A successful UDP write means the local kernel accepted the datagram; it is not a
-hardware acknowledgement. Telemetry therefore distinguishes:
+A successful UDP write only means the local kernel accepted the datagram.
+Telemetry separately reports source assignment, UDP write state, and whether a
+valid floor packet was recently observed.
 
-- exact source assigned;
-- UDP write available;
-- physical floor packet seen recently.
+Incomplete aggregate sensor packets are rejected as a unit so omitted channels
+cannot leave stale canonical pressure behind.
+
+## Diagnostics UI
+
+The loopback HTTP listener defaults to `127.0.0.1:4200` and serves:
+
+- `GET /` and `GET /status` — live floor diagnostics;
+- `GET /state?window=5` — JSON state and per-tile in-memory statistics;
+- `GET /events?window=5` — server-sent live updates;
+- `GET /health` — process liveness;
+- `GET /metrics` — bounded Prometheus telemetry.
+
+The page visualizes desired RGB after the controller fade, canonical pressure,
+step/dwell heatmaps, and the actual hardware channel map. Statistics are
+in-memory, minute-bucketed, bounded to the most recent 60 minutes, and reset on
+process restart.
+
+The service is read-only by default. Development-only pressure simulation and
+statistics reset require `-debug-controls`; mutation requests also require a
+custom same-origin header to prevent simple cross-origin requests to localhost.
+Do not expose debug controls on an untrusted network.
+
+Per-tile heatmap data stays in `/state`; Prometheus exports aggregate counters to
+avoid over a thousand fixed tile series on every scrape.
 
 ## Run
 
-For development, always bind output to loopback:
+Development, with physical output safely bound to loopback:
 
 ```sh
 go run ./cmd/motion-levels-controller -broadcast-ip 127.0.0.1
+```
+
+Development with touch simulation:
+
+```sh
+go run ./cmd/motion-levels-controller \
+  -broadcast-ip 127.0.0.1 \
+  -debug-controls
 ```
 
 Production example:
@@ -137,29 +156,15 @@ go run ./cmd/motion-levels-controller \
   -floor-rotation 0
 ```
 
-Public flags are intentionally small:
+Public flags:
 
-- `-http` — health and metrics listener, default `127.0.0.1:4200`;
+- `-http` — diagnostics/health/metrics, default `127.0.0.1:4200`;
 - `-engine` — engine stream, default `127.0.0.1:4201`;
-- `-recv-port` — physical floor input, default `7800`;
+- `-recv-port` — floor input, default `7800`;
 - `-floor-source-ip` — exact local IPv4 source, optional;
 - `-floor-rotation` — `0` or `180`;
-- `-broadcast-ip` — physical LED destination, default `255.255.255.255`.
-
-The physical destination port (4626), refresh rate (50 fps), and watchdog timing
-are controller constants because they are properties of this installation, not
-product-level runtime choices.
-
-## Health and metrics
-
-- `GET /health` is process liveness and remains HTTP 200 when hardware is absent.
-- `GET /metrics` exposes bounded operational signals.
-- Every other path returns 404.
-
-Important metrics include locally received frame age, safety fade, complete
-frame transactions sent, exact-source assignment, UDP write state, and whether
-a valid physical floor packet was observed recently. No session, player,
-controller, or network identity is used as a metric label.
+- `-broadcast-ip` — LED destination, default `255.255.255.255`;
+- `-debug-controls` — enable local simulation/reset endpoints.
 
 ## Build and validation
 
@@ -169,25 +174,55 @@ make native-build
 make native-verify
 ```
 
-`make check` runs formatting checks, the race-enabled test suite, `go vet`, and a
-static Linux/amd64 build. The native build embeds the exact full Git revision and
-emits a binary, SHA-256 sidecar, and metadata document under `dist/`.
+`make check` runs formatting checks, the race-enabled tests, `go vet`, and a
+static Linux/amd64 build. Native builds embed the exact full Git revision and
+produce a binary, SHA-256 sidecar, and metadata document under `dist/`.
 
-## Nix and NixOS module
+## NixOS
 
-This repository exposes a standard Nix Flake with package and NixOS module definitions:
-
-- **Package**: `packages.${system}.default` / `packages.${system}.motion-levels-controller`
-- **NixOS Module**: `nixosModules.default` / `nixosModules.motion-levels-floor-controller`
-
-Example NixOS usage in downstream venue hosts:
+The flake exports the package and
+`nixosModules.motion-levels-floor-controller`:
 
 ```nix
 {
   services.motion-levels-floor-controller = {
     enable = true;
     floorSourceIP = "192.168.50.10";
-    floorRotation = 0; # or 180
+    floorRotation = 0;
   };
 }
 ```
+
+The module uses systemd readiness/watchdog notifications, starts only after all
+listeners and the initial black-output attempt are established, runs under a
+dynamic user, and applies a restrictive service sandbox.
+
+### Extended validation
+
+The default check is intentionally fast. Before merging controller, wire, sensor,
+or diagnostics changes, also run:
+
+```sh
+make test-stress  # shuffled race suite, repeated ten times
+make fuzz-short   # bounded wire/sensor/mapping fuzz campaigns
+make benchmark    # allocation/performance baselines
+make web-e2e      # real Chromium diagnostics smoke test
+```
+
+`make web-e2e` requires the pinned dependency in `requirements-test.txt` and a
+Playwright Chromium installation:
+
+```sh
+python3 -m pip install -r requirements-test.txt
+python3 -m playwright install chromium
+```
+
+CI runs the race suite, short fuzz campaigns, the real-browser smoke test, the
+native artifact verifier, and Nix package/module evaluation. The complete
+normalized physical-frame fixture under `internal/floor/testdata` must only be
+updated after reviewing the vendor packet delta and completing an on-floor smoke
+test.
+
+The flake should be shipped with a committed `flake.lock`. Generate or refresh it
+from an environment with Nix using `nix flake lock`, review the pinned nixpkgs
+revision, then rerun `nix flake check --show-trace` before merge.

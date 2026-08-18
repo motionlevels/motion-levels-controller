@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,20 +27,22 @@ const (
 	DefaultSyncInterval    = 5 * time.Second
 	DefaultReadTimeout     = 10 * time.Second
 	DefaultWriteTimeout    = 2 * time.Second
+	DefaultDebugPressLease = 2 * time.Second
 )
 
 // BuildRevision is embedded by release builds.
 var BuildRevision = "unknown"
 
 type Config struct {
-	HTTPAddr      string
-	EngineAddr    string
-	ReceiveAddr   string
-	FloorSourceIP string
-	FloorRotation floor.Rotation
-	BroadcastIP   string
-	BroadcastPort int
-	RefreshFPS    int
+	HTTPAddr            string
+	EngineAddr          string
+	ReceiveAddr         string
+	FloorSourceIP       string
+	FloorRotation       floor.Rotation
+	BroadcastIP         string
+	BroadcastPort       int
+	RefreshFPS          int
+	EnableDebugControls bool
 
 	FrameTimeout    time.Duration
 	FrameHold       time.Duration
@@ -49,6 +52,7 @@ type Config struct {
 	SyncInterval    time.Duration
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
+	DebugPressLease time.Duration
 }
 
 func DefaultConfig() Config {
@@ -68,19 +72,22 @@ func DefaultConfig() Config {
 		SyncInterval:    DefaultSyncInterval,
 		ReadTimeout:     DefaultReadTimeout,
 		WriteTimeout:    DefaultWriteTimeout,
+		DebugPressLease: DefaultDebugPressLease,
 	}
 }
 
 func (c Config) Validate() error {
 	var errs []error
-	for name, value := range map[string]string{
-		"http":    c.HTTPAddr,
-		"engine":  c.EngineAddr,
-		"receive": c.ReceiveAddr,
-	} {
-		if strings.TrimSpace(value) == "" {
-			errs = append(errs, fmt.Errorf("%s address must not be empty", name))
-		}
+	if err := validateLoopbackTCPAddress("HTTP", c.HTTPAddr); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateLoopbackTCPAddress("engine", c.EngineAddr); err != nil {
+		errs = append(errs, err)
+	}
+	if strings.TrimSpace(c.ReceiveAddr) == "" {
+		errs = append(errs, fmt.Errorf("receive address must not be empty"))
+	} else if _, err := net.ResolveUDPAddr("udp4", c.ReceiveAddr); err != nil {
+		errs = append(errs, fmt.Errorf("receive address must be a valid IPv4 UDP address: %w", err))
 	}
 	if c.RefreshFPS < 1 || c.RefreshFPS > 500 {
 		errs = append(errs, fmt.Errorf("refresh FPS must be between 1 and 500"))
@@ -108,6 +115,7 @@ func (c Config) Validate() error {
 		"sync interval":     c.SyncInterval,
 		"read timeout":      c.ReadTimeout,
 		"write timeout":     c.WriteTimeout,
+		"debug press lease": c.DebugPressLease,
 	} {
 		if value <= 0 {
 			errs = append(errs, fmt.Errorf("%s must be positive", name))
@@ -117,6 +125,29 @@ func (c Config) Validate() error {
 		errs = append(errs, fmt.Errorf("physical LED count does not match logical grid"))
 	}
 	return errors.Join(errs...)
+}
+
+func validateLoopbackTCPAddress(name, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("%s address must not be empty", name)
+	}
+	host, portValue, err := net.SplitHostPort(value)
+	if err != nil {
+		return fmt.Errorf("%s address must be host:port: %w", name, err)
+	}
+	port, err := strconv.Atoi(portValue)
+	if err != nil || port < 0 || port > 65535 {
+		return fmt.Errorf("%s port must be between 0 and 65535", name)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("%s address must bind to loopback", name)
+	}
+	return nil
 }
 
 type Frame struct {

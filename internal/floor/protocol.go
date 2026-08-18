@@ -60,10 +60,10 @@ func BuildFrame(numControllers, channelCount, ledsPerChannel int, color ColorFun
 	sequence := rand.Intn(0xFFFF)
 	builder := newFrameBuilder()
 	builder.addStart(sequence)
-	colors := make([]RGB, channelCount)
 
 	for controller := 0; controller < numControllers; controller++ {
 		builder.addChannelConfig(controller, channelCount, ledsPerChannel)
+		colors := make([]RGB, channelCount)
 		for position := 0; position < ledsPerChannel; position++ {
 			for channel := 0; channel < channelCount; channel++ {
 				colors[channel] = color(controller, channel, position)
@@ -92,10 +92,7 @@ type frameBuilder struct {
 }
 
 func newFrameBuilder() *frameBuilder {
-	return &frameBuilder{
-		packets: make([][]byte, 0, 4),
-		cursor:  14,
-	}
+	return &frameBuilder{cursor: 14}
 }
 
 func (b *frameBuilder) addStart(sequence int) {

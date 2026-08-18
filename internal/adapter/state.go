@@ -48,8 +48,8 @@ func (s *frameStore) snapshot() (Frame, bool) {
 }
 
 // presentationSnapshot holds a read lock until release is called. Engine
-// replacement takes the write lock, so once a replacement attach completes no
-// transaction can still be sending a frame from the retired generation.
+// replacement takes the write lock, so once replacement completes no physical
+// transaction can still be using a frame from the retired generation.
 func (s *frameStore) presentationSnapshot() (Frame, bool, func()) {
 	s.mu.RLock()
 	if s.frame == nil {
@@ -73,99 +73,200 @@ type TileStats struct {
 
 type FloorStatsSnapshot struct {
 	ActivePressedTiles uint32
+	TotalPresses       uint64
+	PressedDurationSec float64
 	Tiles              [floor.TileCount]TileStats
+}
+
+type minuteStatsBucket struct {
+	valid   bool
+	minute  int64
+	presses [floor.TileCount]uint32
+	dwellNS [floor.TileCount]uint64
 }
 
 type pressureStore struct {
 	mu         sync.RWMutex
 	sequence   uint64
 	observedAt time.Time
-	bits       [floor.PressureByteCount]byte
+
+	// Physical and diagnostic input are independent layers. Canonical pressure
+	// is their union, so expiry/release of a simulated touch can never clear a
+	// tile that remains physically pressed.
+	physicalBits   [floor.PressureByteCount]byte
+	debugBits      [floor.PressureByteCount]byte
+	debugExpiresAt [floor.TileCount]time.Time
+	bits           [floor.PressureByteCount]byte
 
 	activePressedTiles    uint32
 	tilePresses           [floor.TileCount]uint64
-	tilePressedDurationNs [floor.TileCount]uint64
-	tilePressedSince      [floor.TileCount]int64
-
-	lastBucketMinute int64
-	minuteBuckets    [historyMinutes][floor.TileCount]uint32
-	minuteDwellNs    [historyMinutes][floor.TileCount]uint32
+	tilePressedDurationNS [floor.TileCount]uint64
+	tilePressedSince      [floor.TileCount]time.Time
+	minuteBuckets         [historyMinutes]minuteStatsBucket
 
 	subscribers map[chan struct{}]struct{}
 }
 
-func (s *pressureStore) advanceBucketsLocked(minute int64) {
-	if s.lastBucketMinute == 0 {
-		s.lastBucketMinute = minute
-		return
-	}
-	if minute <= s.lastBucketMinute {
-		return
-	}
-	gap := int(minute - s.lastBucketMinute)
-	if gap > historyMinutes {
-		gap = historyMinutes
-	}
-	for i := 1; i <= gap; i++ {
-		idx := (s.lastBucketMinute + int64(i)) % historyMinutes
-		s.minuteBuckets[idx] = [floor.TileCount]uint32{}
-		s.minuteDwellNs[idx] = [floor.TileCount]uint32{}
-	}
-	s.lastBucketMinute = minute
+func bitIsSet(bits *[floor.PressureByteCount]byte, index int) bool {
+	return bits[index/8]&(1<<uint(index%8)) != 0
 }
 
-func (s *pressureStore) apply(changes []pressureChange, observedAt time.Time) (PressureSnapshot, bool) {
+func setBit(bits *[floor.PressureByteCount]byte, index int, pressed bool) {
+	mask := byte(1 << uint(index%8))
+	if pressed {
+		bits[index/8] |= mask
+		return
+	}
+	bits[index/8] &^= mask
+}
+
+func (s *pressureStore) bucketLocked(minute int64) *minuteStatsBucket {
+	index := int(minute % historyMinutes)
+	if index < 0 {
+		index += historyMinutes
+	}
+	bucket := &s.minuteBuckets[index]
+	if !bucket.valid || bucket.minute != minute {
+		*bucket = minuteStatsBucket{valid: true, minute: minute}
+	}
+	return bucket
+}
+
+func (s *pressureStore) addDwellToBucketsLocked(tile int, start, end time.Time) {
+	if !end.After(start) {
+		return
+	}
+	endMinute := end.Add(-time.Nanosecond).Unix() / 60
+	startMinute := start.Unix() / 60
+	earliestMinute := endMinute - historyMinutes + 1
+	if startMinute < earliestMinute {
+		startMinute = earliestMinute
+	}
+	for minute := startMinute; minute <= endMinute; minute++ {
+		bucketStart := time.Unix(minute*60, 0)
+		bucketEnd := bucketStart.Add(time.Minute)
+		overlapStart := start
+		if overlapStart.Before(bucketStart) {
+			overlapStart = bucketStart
+		}
+		overlapEnd := end
+		if overlapEnd.After(bucketEnd) {
+			overlapEnd = bucketEnd
+		}
+		if overlapEnd.After(overlapStart) {
+			s.bucketLocked(minute).dwellNS[tile] += uint64(overlapEnd.Sub(overlapStart))
+		}
+	}
+}
+
+func (s *pressureStore) notifyLocked() {
+	for subscriber := range s.subscribers {
+		select {
+		case subscriber <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (s *pressureStore) updateCanonicalLocked(index int, observedAt time.Time) bool {
+	wasPressed := bitIsSet(&s.bits, index)
+	pressed := bitIsSet(&s.physicalBits, index) || bitIsSet(&s.debugBits, index)
+	if wasPressed == pressed {
+		return false
+	}
+
+	setBit(&s.bits, index, pressed)
+	if pressed {
+		s.tilePresses[index]++
+		s.bucketLocked(observedAt.Unix() / 60).presses[index]++
+		s.tilePressedSince[index] = observedAt
+		s.activePressedTiles++
+		return true
+	}
+
+	if start := s.tilePressedSince[index]; !start.IsZero() {
+		if observedAt.After(start) {
+			duration := observedAt.Sub(start)
+			s.tilePressedDurationNS[index] += uint64(duration)
+			s.addDwellToBucketsLocked(index, start, observedAt)
+		}
+		s.tilePressedSince[index] = time.Time{}
+	}
+	if s.activePressedTiles > 0 {
+		s.activePressedTiles--
+	}
+	return true
+}
+
+func (s *pressureStore) applyLayer(changes []pressureChange, observedAt time.Time, debug bool, lease time.Duration) (PressureSnapshot, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	minute := observedAt.Unix() / 60
-	s.advanceBucketsLocked(minute)
-	bIdx := minute % historyMinutes
 
-	changed := false
+	canonicalChanged := false
 	for _, change := range changes {
 		if !floor.InLogicalBounds(change.X, change.Y) {
 			continue
 		}
 		index := change.Y*floor.GridWidth + change.X
-		mask := byte(1 << uint(index%8))
-		wasPressed := s.bits[index/8]&mask != 0
-		if wasPressed == change.Pressed {
+		layer := &s.physicalBits
+		if debug {
+			layer = &s.debugBits
+			if change.Pressed {
+				s.debugExpiresAt[index] = observedAt.Add(lease)
+			} else {
+				s.debugExpiresAt[index] = time.Time{}
+			}
+		}
+		if bitIsSet(layer, index) == change.Pressed {
+			// Repeated simulated press messages still renew their lease.
 			continue
 		}
-		if change.Pressed {
-			s.bits[index/8] |= mask
-			s.tilePresses[index]++
-			s.minuteBuckets[bIdx][index]++
-			s.tilePressedSince[index] = observedAt.UnixNano()
-			s.activePressedTiles++
-		} else {
-			s.bits[index/8] &^= mask
-			if start := s.tilePressedSince[index]; start > 0 {
-				if observedAt.UnixNano() > start {
-					delta := uint64(observedAt.UnixNano() - start)
-					s.tilePressedDurationNs[index] += delta
-					s.minuteDwellNs[bIdx][index] += uint32(delta)
-				}
-				s.tilePressedSince[index] = 0
-			}
-			if s.activePressedTiles > 0 {
-				s.activePressedTiles--
-			}
-		}
-		changed = true
+		setBit(layer, index, change.Pressed)
+		canonicalChanged = s.updateCanonicalLocked(index, observedAt) || canonicalChanged
 	}
-	if !changed {
+	if !canonicalChanged {
 		return s.snapshotLocked(), false
 	}
+
 	s.sequence++
 	s.observedAt = observedAt
+	s.notifyLocked()
+	return s.snapshotLocked(), true
+}
 
-	for ch := range s.subscribers {
-		select {
-		case ch <- struct{}{}:
-		default:
+// apply is retained as the physical-input operation used throughout the core
+// adapter and existing characterization tests.
+func (s *pressureStore) apply(changes []pressureChange, observedAt time.Time) (PressureSnapshot, bool) {
+	return s.applyLayer(changes, observedAt, false, 0)
+}
+
+func (s *pressureStore) applyDebug(changes []pressureChange, observedAt time.Time, lease time.Duration) (PressureSnapshot, bool) {
+	return s.applyLayer(changes, observedAt, true, lease)
+}
+
+func (s *pressureStore) expireDebug(now time.Time) (PressureSnapshot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	canonicalChanged := false
+	for index, expiresAt := range s.debugExpiresAt {
+		if expiresAt.IsZero() || now.Before(expiresAt) {
+			continue
 		}
+		s.debugExpiresAt[index] = time.Time{}
+		if !bitIsSet(&s.debugBits, index) {
+			continue
+		}
+		setBit(&s.debugBits, index, false)
+		canonicalChanged = s.updateCanonicalLocked(index, now) || canonicalChanged
 	}
+	if !canonicalChanged {
+		return s.snapshotLocked(), false
+	}
+
+	s.sequence++
+	s.observedAt = now
+	s.notifyLocked()
 	return s.snapshotLocked(), true
 }
 
@@ -184,70 +285,83 @@ func (s *pressureStore) snapshotLocked() PressureSnapshot {
 }
 
 func (s *pressureStore) statsSnapshot(now time.Time, windowMinutes int) FloorStatsSnapshot {
-	s.mu.Lock()
-	minute := now.Unix() / 60
-	s.advanceBucketsLocked(minute)
-	s.mu.Unlock()
-
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var snapshot FloorStatsSnapshot
 	snapshot.ActivePressedTiles = s.activePressedTiles
-	nowNanos := now.UnixNano()
 
 	if windowMinutes <= 0 || windowMinutes > historyMinutes {
-		// Lifetime
 		for index := 0; index < floor.TileCount; index++ {
-			durationNs := s.tilePressedDurationNs[index]
-			if start := s.tilePressedSince[index]; start > 0 && nowNanos > start {
-				durationNs += uint64(nowNanos - start)
+			durationNS := s.tilePressedDurationNS[index]
+			if start := s.tilePressedSince[index]; !start.IsZero() && now.After(start) {
+				durationNS += uint64(now.Sub(start))
 			}
-			snapshot.Tiles[index] = TileStats{
+			stats := TileStats{
 				Presses:            s.tilePresses[index],
-				PressedDurationSec: float64(durationNs) / 1e9,
+				PressedDurationSec: float64(durationNS) / float64(time.Second),
 			}
+			snapshot.Tiles[index] = stats
+			snapshot.TotalPresses += stats.Presses
+			snapshot.PressedDurationSec += stats.PressedDurationSec
 		}
 		return snapshot
 	}
 
-	// Windowed (e.g. 5m, 15m)
+	currentMinute := now.Unix() / 60
+	earliestMinute := currentMinute - int64(windowMinutes) + 1
+	windowStart := now.Add(-time.Duration(windowMinutes) * time.Minute)
 	for index := 0; index < floor.TileCount; index++ {
-		var count uint32
-		var dwellNs uint64
-		for w := 0; w < windowMinutes; w++ {
-			bIdx := (minute - int64(w)) % historyMinutes
-			if bIdx < 0 {
-				bIdx += historyMinutes
+		var presses uint64
+		var dwellNS uint64
+		for minute := earliestMinute; minute <= currentMinute; minute++ {
+			bucketIndex := int(minute % historyMinutes)
+			if bucketIndex < 0 {
+				bucketIndex += historyMinutes
 			}
-			count += s.minuteBuckets[bIdx][index]
-			dwellNs += uint64(s.minuteDwellNs[bIdx][index])
+			bucket := &s.minuteBuckets[bucketIndex]
+			if bucket.valid && bucket.minute == minute {
+				presses += uint64(bucket.presses[index])
+				dwellNS += bucket.dwellNS[index]
+			}
 		}
-		if start := s.tilePressedSince[index]; start > 0 && nowNanos > start {
-			dwellNs += uint64(nowNanos - start)
+		if start := s.tilePressedSince[index]; !start.IsZero() && now.After(start) {
+			overlapStart := start
+			if overlapStart.Before(windowStart) {
+				overlapStart = windowStart
+			}
+			if now.After(overlapStart) {
+				dwellNS += uint64(now.Sub(overlapStart))
+			}
 		}
-		snapshot.Tiles[index] = TileStats{
-			Presses:            uint64(count),
-			PressedDurationSec: float64(dwellNs) / 1e9,
+		stats := TileStats{
+			Presses:            presses,
+			PressedDurationSec: float64(dwellNS) / float64(time.Second),
 		}
+		snapshot.Tiles[index] = stats
+		snapshot.TotalPresses += stats.Presses
+		snapshot.PressedDurationSec += stats.PressedDurationSec
 	}
 	return snapshot
 }
 
-func (s *pressureStore) resetStats() {
+// resetStats clears only diagnostic counters. Canonical pressure remains
+// untouched, and any currently held tile starts accruing new dwell from now.
+func (s *pressureStore) resetStats(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.tilePresses = [floor.TileCount]uint64{}
-	s.tilePressedDurationNs = [floor.TileCount]uint64{}
-	s.minuteBuckets = [historyMinutes][floor.TileCount]uint32{}
-	s.minuteDwellNs = [historyMinutes][floor.TileCount]uint32{}
-	s.lastBucketMinute = 0
-	for ch := range s.subscribers {
-		select {
-		case ch <- struct{}{}:
-		default:
+	s.tilePressedDurationNS = [floor.TileCount]uint64{}
+	s.minuteBuckets = [historyMinutes]minuteStatsBucket{}
+	for index := 0; index < floor.TileCount; index++ {
+		if bitIsSet(&s.bits, index) {
+			s.tilePressedSince[index] = now
+		} else {
+			s.tilePressedSince[index] = time.Time{}
 		}
 	}
+	s.notifyLocked()
 }
 
 func (s *pressureStore) subscribe() (<-chan struct{}, func()) {
@@ -256,14 +370,17 @@ func (s *pressureStore) subscribe() (<-chan struct{}, func()) {
 	if s.subscribers == nil {
 		s.subscribers = make(map[chan struct{}]struct{})
 	}
-	ch := make(chan struct{}, 1)
-	s.subscribers[ch] = struct{}{}
+	channel := make(chan struct{}, 1)
+	s.subscribers[channel] = struct{}{}
+	var once sync.Once
 	unsubscribe := func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		delete(s.subscribers, ch)
+		once.Do(func() {
+			s.mu.Lock()
+			delete(s.subscribers, channel)
+			s.mu.Unlock()
+		})
 	}
-	return ch, unsubscribe
+	return channel, unsubscribe
 }
 
 func replaceLatest[T any](channel chan T, value T) {

@@ -1,573 +1,130 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Motion Levels Floor Controller</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #0e1116;
-        color: #f4f7fb;
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        margin: 0;
-        min-height: 100vh;
-        overflow: hidden;
-      }
-
-      main {
-        width: 100vw;
-        height: 100vh;
-        display: grid;
-        place-items: center;
-        background: #05070a;
-      }
-
-      .chrome {
-        position: fixed;
-        top: 10px;
-        left: 10px;
-        right: 10px;
-        z-index: 2;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        justify-content: flex-end;
-        min-width: 0;
-        pointer-events: none;
-      }
-
-      .telemetry {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        min-width: 0;
-        background: rgba(7, 10, 15, 0.65);
-        padding: 0 10px;
-        height: 28px;
-        border-radius: 6px;
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        backdrop-filter: blur(8px);
-      }
-
-      .controls {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        pointer-events: auto;
-      }
-
-      .btn-group {
-        display: inline-flex;
-        align-items: center;
-        background: rgba(7, 10, 15, 0.65);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 6px;
-        padding: 2px;
-        gap: 2px;
-        backdrop-filter: blur(8px);
-        height: 28px;
-      }
-
-      .btn-mode {
-        background: transparent;
-        border: 1px solid transparent;
-        border-radius: 4px;
-        color: rgba(244, 247, 251, 0.72);
-        font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-        height: 22px;
-        padding: 0 8px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        transition: all 0.15s ease;
-      }
-
-      .btn-mode:hover {
-        background: rgba(255, 255, 255, 0.08);
-        color: #fff;
-      }
-
-      .btn-mode.active {
-        background: rgba(54, 214, 107, 0.2);
-        border-color: rgba(54, 214, 107, 0.45);
-        color: #36d66b;
-      }
-
-      .btn-win.active {
-        background: rgba(59, 130, 246, 0.25);
-        border-color: rgba(59, 130, 246, 0.45);
-        color: #60a5fa;
-      }
-
-      .btn-reset:hover {
-        background: rgba(239, 68, 68, 0.25);
-        border-color: rgba(239, 68, 68, 0.45);
-        color: #f87171;
-      }
-
-      #status {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: #64748b;
-        box-shadow: 0 0 0 1px rgba(5, 7, 10, 0.65);
-      }
-
-      #status.live {
-        background: #36d66b;
-        box-shadow: 0 0 10px rgba(54, 214, 107, 0.85);
-      }
-
-      #status.error {
-        background: #ff5c5c;
-        box-shadow: 0 0 10px rgba(255, 92, 92, 0.75);
-      }
-
-      #config {
-        flex: 0 1 auto;
-        min-width: 0;
-        overflow: hidden;
-        color: rgba(244, 247, 251, 0.72);
-        font: 600 10px/1.1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-        letter-spacing: 0;
-        text-overflow: ellipsis;
-        text-transform: uppercase;
-        white-space: nowrap;
-        text-shadow: 0 1px 3px rgba(5, 7, 10, 0.85);
-      }
-
-      #fullscreen {
-        background: rgba(7, 10, 15, 0.65);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 6px;
-        color: rgba(244, 247, 251, 0.72);
-        cursor: pointer;
-        width: 28px;
-        height: 28px;
-        padding: 0;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        pointer-events: auto;
-        backdrop-filter: blur(8px);
-        transition: all 0.15s ease;
-      }
-
-      #fullscreen:hover {
-        background: rgba(255, 255, 255, 0.08);
-        color: #fff;
-      }
-
-      #fullscreen:focus-visible {
-        outline: 2px solid rgba(255, 255, 255, 0.85);
-        outline-offset: 2px;
-      }
-
-      .fullscreen-icon {
-        width: 14px;
-        height: 14px;
-        display: block;
-      }
-
-      .fullscreen-icon path {
-        fill: none;
-        stroke: currentColor;
-        stroke-width: 1.7;
-        stroke-linecap: round;
-        stroke-linejoin: round;
-      }
-
-      .fullscreen-icon.exit,
-      #fullscreen[aria-pressed="true"] .fullscreen-icon.enter {
-        display: none;
-      }
-
-      #fullscreen[aria-pressed="true"] .fullscreen-icon.exit {
-        display: block;
-      }
-
-      #board {
-        position: relative;
-        display: grid;
-        grid-template-columns: repeat(var(--board-cols, 32), minmax(0, 1fr));
-        grid-template-rows: repeat(var(--board-rows, 16), minmax(0, 1fr));
-        gap: 2px;
-        aspect-ratio: var(--board-cols, 32) / var(--board-rows, 16);
-        width: min(98vw, calc(98vh * var(--board-aspect, 2)));
-        height: min(98vh, calc(98vw / var(--board-aspect, 2)));
-        background: #05070a;
-        touch-action: none;
-        user-select: none;
-      }
-
-      .tile {
-        background: #111827;
-        min-width: 0;
-        min-height: 0;
-        box-shadow: inset 0 0 0 0 rgba(255, 46, 46, 0);
-        position: relative;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 8px;
-        font-family: ui-monospace, monospace;
-        color: rgba(255, 255, 255, 0.7);
-      }
-
-      .tile.pressed {
-        box-shadow:
-          inset 0 0 0 3px #ff3030,
-          0 0 10px rgba(255, 48, 48, 0.75);
-      }
-
-      .tile-label {
-        display: none;
-        pointer-events: none;
-      }
-
-      .mode-heatmaps .tile-label,
-      .mode-channels .tile-label {
-        display: block;
-      }
-    </style>
-  </head>
-  <body>
-    <main>
-      <div class="chrome">
-        <div class="telemetry">
-          <div id="status" aria-label="Connection status"></div>
-          <div id="config" aria-label="Controller configuration"></div>
-        </div>
-        <div class="controls">
-          <div class="btn-group">
-            <button id="mode-live" class="btn-mode active" title="Live RGB and pressure">Live</button>
-            <button id="mode-steps" class="btn-mode" title="Step count heatmap">Steps</button>
-            <button id="mode-dwell" class="btn-mode" title="Dwell duration heatmap">Dwell</button>
-            <button id="mode-channels" class="btn-mode" title="Hardware channel mapping">Channels</button>
-          </div>
-          <div class="btn-group">
-            <button id="win-5m" class="btn-mode btn-win active" title="Rolling last 5 minutes">5m</button>
-            <button id="win-15m" class="btn-mode btn-win" title="Rolling last 15 minutes">15m</button>
-            <button id="win-all" class="btn-mode btn-win" title="All-time lifetime stats">All</button>
-            <button id="btn-reset" class="btn-mode btn-reset" title="Reset session statistics">Reset</button>
-          </div>
-          <button id="fullscreen" type="button" aria-label="Toggle fullscreen" aria-pressed="false" title="Fullscreen">
-            <svg class="fullscreen-icon enter" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M8 8 4 4" />
-              <path d="M4 4h5" />
-              <path d="M4 4v5" />
-              <path d="m16 8 4-4" />
-              <path d="M20 4h-5" />
-              <path d="M20 4v5" />
-              <path d="m8 16-4 4" />
-              <path d="M4 20h5" />
-              <path d="M4 20v-5" />
-              <path d="m16 16 4 4" />
-              <path d="M20 20h-5" />
-              <path d="M20 20v-5" />
-            </svg>
-            <svg class="fullscreen-icon exit" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m4 8 4 4" />
-              <path d="M8 12H3" />
-              <path d="M8 12V7" />
-              <path d="m20 8-4 4" />
-              <path d="M16 12h5" />
-              <path d="M16 12V7" />
-              <path d="m4 16 4-4" />
-              <path d="M8 12H3" />
-              <path d="M8 12v5" />
-              <path d="m20 16-4-4" />
-              <path d="M16 12h5" />
-              <path d="M16 12v5" />
-            </svg>
-          </button>
-        </div>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Motion Levels Floor Controller</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter,ui-sans-serif,system-ui,-apple-system,sans-serif; background:#05070a; color:#f4f7fb }
+    * { box-sizing:border-box }
+    body { margin:0; min-height:100vh; overflow:hidden; background:#05070a }
+    main { width:100vw; height:100vh; display:grid; place-items:center }
+    .chrome { position:fixed; inset:10px 10px auto; z-index:2; display:flex; justify-content:flex-end; align-items:center; gap:8px; pointer-events:none }
+    .telemetry,.group,button.icon { height:30px; border:1px solid rgba(255,255,255,.13); border-radius:7px; background:rgba(7,10,15,.72); backdrop-filter:blur(9px) }
+    .telemetry { display:flex; align-items:center; gap:8px; min-width:0; padding:0 11px }
+    #status { width:8px; height:8px; border-radius:50%; background:#64748b }
+    #status.live { background:#36d66b; box-shadow:0 0 10px rgba(54,214,107,.8) }
+    #status.error { background:#ff5c5c; box-shadow:0 0 10px rgba(255,92,92,.75) }
+    #config { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:rgba(244,247,251,.75); font:600 10px/1.1 ui-monospace,SFMono-Regular,Menlo,monospace; text-transform:uppercase }
+    .controls,.group { display:flex; align-items:center; gap:3px; pointer-events:auto }
+    .group { padding:3px }
+    button { border:1px solid transparent; border-radius:4px; color:rgba(244,247,251,.72); background:transparent; cursor:pointer; font:600 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace }
+    button.mode { height:22px; padding:0 8px }
+    button:hover:not(:disabled) { color:#fff; background:rgba(255,255,255,.08) }
+    button.active { color:#36d66b; border-color:rgba(54,214,107,.45); background:rgba(54,214,107,.18) }
+    button.window.active { color:#60a5fa; border-color:rgba(96,165,250,.45); background:rgba(59,130,246,.22) }
+    button.danger:hover { color:#f87171; border-color:rgba(248,113,113,.45); background:rgba(239,68,68,.18) }
+    button:disabled { display:none }
+    button.icon { width:30px; padding:0; display:grid; place-items:center }
+    button:focus-visible { outline:2px solid #fff; outline-offset:2px }
+    #board { --cols:32; --rows:16; --aspect:2; position:relative; display:grid; grid-template-columns:repeat(var(--cols),minmax(0,1fr)); grid-template-rows:repeat(var(--rows),minmax(0,1fr)); gap:2px; aspect-ratio:var(--aspect); width:min(98vw,calc(98vh * var(--aspect))); height:min(98vh,calc(98vw / var(--aspect))); touch-action:none; user-select:none }
+    .tile { position:relative; display:grid; place-items:center; min-width:0; min-height:0; background:#111827; color:rgba(255,255,255,.8); font:600 8px/1 ui-monospace,monospace }
+    .tile.pressed { box-shadow:inset 0 0 0 3px #ff3030,0 0 10px rgba(255,48,48,.7) }
+    .label { display:none; pointer-events:none }
+    #board.stats .label,#board.channels .label { display:block }
+    @media (max-width:800px) { .chrome { inset:6px 6px auto; flex-wrap:wrap } .telemetry { max-width:100% } button.mode { padding:0 6px } }
+  </style>
+</head>
+<body>
+<main>
+  <div class="chrome">
+    <div class="telemetry"><span id="status" aria-label="Connection status"></span><span id="config"></span></div>
+    <div class="controls">
+      <div class="group" aria-label="View mode">
+        <button class="mode active" data-mode="live">Live</button><button class="mode" data-mode="steps">Steps</button><button class="mode" data-mode="dwell">Dwell</button><button class="mode" data-mode="channels">Channels</button>
       </div>
-      <div id="board" aria-label="LED floor preview"></div>
-    </main>
+      <div class="group" aria-label="Statistics window">
+        <button class="mode window active" data-window="5">5m</button><button class="mode window" data-window="15">15m</button><button class="mode window" data-window="0">All</button><button id="reset" class="mode danger" disabled>Reset</button>
+      </div>
+      <button id="fullscreen" class="icon" aria-label="Toggle fullscreen" title="Fullscreen">⛶</button>
+    </div>
+  </div>
+  <div id="board" aria-label="LED floor preview"></div>
+</main>
+<script>
+  const width=16,height=32,tileCount=width*height;
+  const board=document.querySelector('#board'),statusEl=document.querySelector('#status'),configEl=document.querySelector('#config'),resetButton=document.querySelector('#reset');
+  const tiles=new Map(),activePointers=new Map();
+  let mode='live',windowMinutes=5,eventSource=null,state=null,pressure=new Uint8Array(64),rgb=new Uint8Array(tileCount*3),stats=[];
+  const channelColors=['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#84cc16'];
 
-    <script>
-      const width = 16;
-      const height = 32;
-      const board = document.getElementById("board");
-      const statusEl = document.getElementById("status");
-      const configEl = document.getElementById("config");
-      const fullscreenButton = document.getElementById("fullscreen");
-      const tiles = new Map();
-      const activePointers = new Map();
-      let currentMode = "live"; // "live", "steps", "dwell", "channels"
-      let currentWindow = 5; // 5, 15, 0
-      let currentPressureBits = new Uint8Array(64);
-      let currentRGB = new Uint8Array(16 * 32 * 3);
-      let currentStatsData = null;
-      let orientation = "";
+  for(let y=0;y<height;y++) for(let x=0;x<width;x++){
+    const tile=document.createElement('div'); tile.className='tile'; tile.dataset.key=`${x},${y}`;
+    const label=document.createElement('span'); label.className='label'; tile.append(label); board.append(tile); tiles.set(tile.dataset.key,tile);
+  }
 
-      const channelColors = [
-        "#3b82f6", "#10b981", "#f59e0b", "#ef4444",
-        "#8b5cf6", "#ec4899", "#06b6d4", "#84cc16"
-      ];
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const tile = document.createElement("div");
-          tile.className = "tile";
-          tile.dataset.key = `${x},${y}`;
-          const label = document.createElement("span");
-          label.className = "tile-label";
-          tile.appendChild(label);
-          board.appendChild(tile);
-          tiles.set(tile.dataset.key, tile);
-        }
+  function orient(){
+    const landscape=innerWidth>=innerHeight,cols=landscape?height:width,rows=landscape?width:height;
+    board.style.setProperty('--cols',cols); board.style.setProperty('--rows',rows); board.style.setProperty('--aspect',cols/rows);
+    for(const tile of tiles.values()){ const [x,y]=tile.dataset.key.split(',').map(Number); tile.style.gridColumn=(landscape?y:x)+1; tile.style.gridRow=(landscape?x:y)+1; }
+  }
+  function channelFor(x,y){ const wireY=state?.floor_rotation===180?height-1-y:y; return 7-Math.floor(wireY/4); }
+  function render(){
+    let maxSteps=1,maxDwell=1; for(const item of stats){ maxSteps=Math.max(maxSteps,item.presses||0); maxDwell=Math.max(maxDwell,item.duration||0); }
+    const scale=1-Math.min(1,Math.max(0,state?.fade_ratio??1));
+    for(let y=0;y<height;y++) for(let x=0;x<width;x++){
+      const index=y*width+x,tile=tiles.get(`${x},${y}`),label=tile.querySelector('.label');
+      tile.classList.toggle('pressed',Boolean(pressure[index>>3]&(1<<(index&7))));
+      if(mode==='live'){
+        const offset=index*3; tile.style.backgroundColor=`rgb(${Math.round(rgb[offset]*scale)},${Math.round(rgb[offset+1]*scale)},${Math.round(rgb[offset+2]*scale)})`; label.textContent='';
+      }else if(mode==='steps'){
+        const value=stats[index]?.presses||0,ratio=value/maxSteps; tile.style.backgroundColor=value?`rgba(239,68,68,${.15+ratio*.85})`:'#111827'; label.textContent=value||'';
+      }else if(mode==='dwell'){
+        const value=stats[index]?.duration||0,ratio=value/maxDwell; tile.style.backgroundColor=value?`rgba(59,130,246,${.15+ratio*.85})`:'#111827'; label.textContent=value?`${value.toFixed(1)}s`:'';
+      }else{
+        const channel=channelFor(x,y); tile.style.backgroundColor=channelColors[channel]; label.textContent=`CH${channel}`;
       }
+    }
+  }
+  function decodeBase64(value,target){ target.fill(0); if(!value)return; const raw=atob(value); for(let i=0;i<Math.min(raw.length,target.length);i++)target[i]=raw.charCodeAt(i); }
+  function update(next){
+    state=next; if(Array.isArray(next.tile_stats))stats=next.tile_stats;
+    decodeBase64(next.pressure_base64,pressure); decodeBase64(next.rgb_base64,rgb);
+    statusEl.className=next.engine_connected?'live':'';
+    const fps=Number.isFinite(next.fps)?next.fps.toFixed(0):'0';
+    configEl.textContent=[`${fps}/${next.configured_fps} FPS`,`ENGINE ${next.engine_connected?'ONLINE':'WAITING'}`,`UDP ${String(next.udp_write).toUpperCase()}`,`FLOOR ${next.floor_seen?'ACTIVE':'NO LINK'}`,`ACTIVE ${next.active_pressed_tiles}/${tileCount}`].join(' · ');
+    resetButton.disabled=!next.debug_controls_enabled; render();
+  }
+  async function fetchState(){ try{ const response=await fetch(`/state?window=${windowMinutes}`,{cache:'no-store'}); if(response.ok)update(await response.json()); }catch{} }
+  function connect(){
+    eventSource?.close(); eventSource=new EventSource(`/events?window=${windowMinutes}`);
+    eventSource.onopen=()=>statusEl.className=state?.engine_connected?'live':'';
+    eventSource.onerror=()=>{ statusEl.className='error'; fetchState(); };
+    eventSource.addEventListener('state',event=>{ try{update(JSON.parse(event.data));}catch{} });
+  }
+  function setMode(next){ mode=next; document.querySelectorAll('[data-mode]').forEach(button=>button.classList.toggle('active',button.dataset.mode===next)); board.className=next==='channels'?'channels':next==='steps'||next==='dwell'?'stats':''; render(); }
+  function setWindow(next){ windowMinutes=next; document.querySelectorAll('[data-window]').forEach(button=>button.classList.toggle('active',Number(button.dataset.window)===next)); connect(); fetchState(); }
+  document.querySelectorAll('[data-mode]').forEach(button=>button.onclick=()=>setMode(button.dataset.mode));
+  document.querySelectorAll('[data-window]').forEach(button=>button.onclick=()=>setWindow(Number(button.dataset.window)));
+  resetButton.onclick=async()=>{ if(!confirm('Reset local in-memory step and dwell statistics?'))return; await fetch('/stats/reset',{method:'POST',headers:{'X-Motion-Levels-Debug':'1'}}); await fetchState(); };
+  document.querySelector('#fullscreen').onclick=()=>document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen();
 
-      function applyOrientation() {
-        const nextOrientation = window.innerWidth >= window.innerHeight ? "landscape" : "portrait";
-        if (nextOrientation === orientation) return;
-        orientation = nextOrientation;
-
-        const cols = orientation === "landscape" ? height : width;
-        const rows = orientation === "landscape" ? width : height;
-        board.style.setProperty("--board-cols", cols);
-        board.style.setProperty("--board-rows", rows);
-        board.style.setProperty("--board-aspect", cols / rows);
-
-        for (const tile of tiles.values()) {
-          const [x, y] = tile.dataset.key.split(",").map(Number);
-          tile.style.gridColumn = orientation === "landscape" ? y + 1 : x + 1;
-          tile.style.gridRow = orientation === "landscape" ? x + 1 : y + 1;
-        }
-      }
-
-      function setMode(mode) {
-        currentMode = mode;
-        ["live", "steps", "dwell", "channels"].forEach(m => {
-          document.getElementById(`mode-${m}`).classList.toggle("active", m === mode);
-        });
-        board.className = mode === "steps" || mode === "dwell" ? "mode-heatmaps" : mode === "channels" ? "mode-channels" : "";
-        renderBoard();
-      }
-
-      function setWindow(w) {
-        currentWindow = w;
-        document.getElementById("win-5m").classList.toggle("active", w === 5);
-        document.getElementById("win-15m").classList.toggle("active", w === 15);
-        document.getElementById("win-all").classList.toggle("active", w === 0);
-        renderBoard();
-      }
-
-      document.getElementById("mode-live").onclick = () => setMode("live");
-      document.getElementById("mode-steps").onclick = () => setMode("steps");
-      document.getElementById("mode-dwell").onclick = () => setMode("dwell");
-      document.getElementById("mode-channels").onclick = () => setMode("channels");
-
-      document.getElementById("win-5m").onclick = () => setWindow(5);
-      document.getElementById("win-15m").onclick = () => setWindow(15);
-      document.getElementById("win-all").onclick = () => setWindow(0);
-
-      document.getElementById("btn-reset").onclick = async () => {
-        if (confirm("Reset current floor session step and dwell counters?")) {
-          await fetch("/stats/reset", { method: "POST" });
-          fetchState();
-        }
-      };
-
-      function getEffectiveStats() {
-        if (!currentStatsData) return [];
-        if (currentWindow === 5 && currentStatsData.tile_stats_5m) return currentStatsData.tile_stats_5m;
-        if (currentWindow === 15 && currentStatsData.tile_stats_15m) return currentStatsData.tile_stats_15m;
-        return currentStatsData.tile_stats || [];
-      }
-
-      function renderBoard() {
-        const stats = getEffectiveStats();
-        let maxSteps = 1;
-        let maxDwell = 1;
-        if (stats.length === width * height) {
-          for (const s of stats) {
-            if (s.presses > maxSteps) maxSteps = s.presses;
-            if (s.duration > maxDwell) maxDwell = s.duration;
-          }
-        }
-
-        for (let y = 0; y < height; y++) {
-          for (let x = 0; x < width; x++) {
-            const idx = y * width + x;
-            const tile = tiles.get(`${x},${y}`);
-            if (!tile) continue;
-
-            const pressed = Boolean(currentPressureBits[Math.floor(idx / 8)] & (1 << (idx % 8)));
-            tile.classList.toggle("pressed", pressed);
-            const label = tile.querySelector(".tile-label");
-
-            if (currentMode === "live") {
-              const rgbIndex = idx * 3;
-              const r = currentRGB[rgbIndex] || 0;
-              const g = currentRGB[rgbIndex + 1] || 0;
-              const b = currentRGB[rgbIndex + 2] || 0;
-              tile.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
-              label.textContent = "";
-            } else if (currentMode === "steps") {
-              const stat = stats[idx] || { presses: 0 };
-              const ratio = Math.min(1, stat.presses / maxSteps);
-              tile.style.backgroundColor = stat.presses > 0
-                ? `rgba(239, 68, 68, ${0.15 + ratio * 0.85})`
-                : "#111827";
-              label.textContent = stat.presses > 0 ? stat.presses : "";
-            } else if (currentMode === "dwell") {
-              const stat = stats[idx] || { duration: 0 };
-              const ratio = Math.min(1, stat.duration / maxDwell);
-              tile.style.backgroundColor = stat.duration > 0
-                ? `rgba(59, 130, 246, ${0.15 + ratio * 0.85})`
-                : "#111827";
-              label.textContent = stat.duration > 0 ? `${stat.duration.toFixed(1)}s` : "";
-            } else if (currentMode === "channels") {
-              const channel = y < 16 ? Math.floor(x / 4) : Math.floor(x / 4) + 4;
-              tile.style.backgroundColor = channelColors[channel % 8];
-              label.textContent = `CH${channel}`;
-            }
-          }
-        }
-      }
-
-      function updateStatus(state) {
-        currentStatsData = state;
-        statusEl.className = state.engine_connected ? "live" : "live";
-        const parts = [
-          `${state.fps || 50} FPS`,
-          `${width}x${height}`,
-          `ENGINE ${state.engine_connected ? "ONLINE" : "WAITING"}`,
-          `UDP ${state.udp_write}`,
-          `FLOOR ${state.floor_seen ? "ACTIVE" : "NO LINK"}`,
-          `ACTIVE ${state.active_pressed_tiles}/${width * height}`
-        ];
-        configEl.textContent = parts.join("  ·  ");
-
-        if (state.pressure_base64) {
-          const raw = atob(state.pressure_base64);
-          for (let i = 0; i < raw.length && i < 64; i++) {
-            currentPressureBits[i] = raw.charCodeAt(i);
-          }
-        }
-        if (state.rgb_base64) {
-          const raw = atob(state.rgb_base64);
-          for (let i = 0; i < raw.length && i < currentRGB.length; i++) {
-            currentRGB[i] = raw.charCodeAt(i);
-          }
-        }
-        renderBoard();
-      }
-
-      function connectEvents() {
-        const eventSource = new EventSource("/events");
-        eventSource.onopen = () => {
-          statusEl.className = "live";
-        };
-        eventSource.onerror = () => {
-          statusEl.className = "error";
-          fetchState();
-        };
-        eventSource.addEventListener("state", (event) => {
-          try {
-            updateStatus(JSON.parse(event.data));
-          } catch (e) {}
-        });
-      }
-
-      async function fetchState() {
-        try {
-          const res = await fetch(`/state?window=${currentWindow}`);
-          if (res.ok) {
-            const data = await res.json();
-            updateStatus(data);
-          }
-        } catch (e) {}
-      }
-
-      fullscreenButton.addEventListener("click", async () => {
-        if (document.fullscreenElement) {
-          await document.exitFullscreen();
-          return;
-        }
-        await document.documentElement.requestFullscreen();
-      });
-
-      document.addEventListener("fullscreenchange", () => {
-        const isFullscreen = Boolean(document.fullscreenElement);
-        fullscreenButton.setAttribute("aria-pressed", String(isFullscreen));
-        fullscreenButton.title = isFullscreen ? "Exit fullscreen" : "Fullscreen";
-      });
-
-      function tileFromEvent(event) {
-        const element = document.elementFromPoint(event.clientX, event.clientY);
-        if (!element || !element.classList.contains("tile")) return null;
-        return element;
-      }
-
-      function sendPress(tile, pressed) {
-        if (!tile) return;
-        const [x, y] = tile.dataset.key.split(",").map(Number);
-        fetch("/press", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ x, y, pressed })
-        }).catch(() => {});
-        tile.classList.toggle("pressed", pressed);
-      }
-
-      board.addEventListener("pointerdown", (event) => {
-        const tile = tileFromEvent(event);
-        if (!tile) return;
-        event.preventDefault();
-        board.setPointerCapture(event.pointerId);
-        activePointers.set(event.pointerId, tile.dataset.key);
-        sendPress(tile, true);
-      });
-
-      board.addEventListener("pointermove", (event) => {
-        if (!activePointers.has(event.pointerId)) return;
-        const tile = tileFromEvent(event);
-        const previousKey = activePointers.get(event.pointerId);
-        const nextKey = tile?.dataset.key;
-        if (!nextKey || nextKey === previousKey) return;
-        event.preventDefault();
-        sendPress(tiles.get(previousKey), false);
-        activePointers.set(event.pointerId, nextKey);
-        sendPress(tile, true);
-      });
-
-      function releasePointer(event) {
-        const previousKey = activePointers.get(event.pointerId);
-        if (!previousKey) return;
-        event.preventDefault();
-        sendPress(tiles.get(previousKey), false);
-        activePointers.delete(event.pointerId);
-        if (board.hasPointerCapture(event.pointerId)) {
-          board.releasePointerCapture(event.pointerId);
-        }
-      }
-
-      board.addEventListener("pointerup", releasePointer);
-      board.addEventListener("pointercancel", releasePointer);
-      board.addEventListener("pointerleave", (event) => {
-        if (activePointers.has(event.pointerId)) {
-          releasePointer(event);
-        }
-      });
-
-      applyOrientation();
-      window.addEventListener("resize", applyOrientation);
-      window.addEventListener("orientationchange", applyOrientation);
-      connectEvents();
-      setInterval(fetchState, 2000);
-    </script>
-  </body>
+  function tileAt(event){ const element=document.elementFromPoint(event.clientX,event.clientY); return element?.closest?.('.tile')||null; }
+  function sendPress(tile,pressed,keepalive=false){
+    if(!tile||!state?.debug_controls_enabled||mode!=='live')return; const [x,y]=tile.dataset.key.split(',').map(Number);
+    fetch('/press',{method:'POST',headers:{'Content-Type':'application/json','X-Motion-Levels-Debug':'1'},body:JSON.stringify({x,y,pressed}),keepalive}).catch(()=>{});
+    tile.classList.toggle('pressed',pressed);
+  }
+  board.addEventListener('pointerdown',event=>{ const tile=tileAt(event); if(!tile||!state?.debug_controls_enabled||mode!=='live')return; event.preventDefault(); board.setPointerCapture(event.pointerId); activePointers.set(event.pointerId,tile.dataset.key); sendPress(tile,true); });
+  board.addEventListener('pointermove',event=>{ if(!activePointers.has(event.pointerId))return; const tile=tileAt(event),previous=activePointers.get(event.pointerId),next=tile?.dataset.key; if(!next||next===previous)return; sendPress(tiles.get(previous),false); activePointers.set(event.pointerId,next); sendPress(tile,true); });
+  function release(event){ const key=activePointers.get(event.pointerId); if(!key)return; sendPress(tiles.get(key),false); activePointers.delete(event.pointerId); if(board.hasPointerCapture(event.pointerId))board.releasePointerCapture(event.pointerId); }
+  board.addEventListener('pointerup',release); board.addEventListener('pointercancel',release);
+  function releaseAll(){ for(const key of activePointers.values())sendPress(tiles.get(key),false,true); activePointers.clear(); }
+  // Renew the server-side safety lease while a pointer remains held. If the
+  // browser disappears, the lease still expires and heals canonical pressure.
+  setInterval(()=>{ for(const key of activePointers.values())sendPress(tiles.get(key),true); },500);
+  addEventListener('blur',releaseAll); addEventListener('pagehide',releaseAll); document.addEventListener('visibilitychange',()=>{if(document.hidden)releaseAll();});
+  orient(); addEventListener('resize',orient); connect(); fetchState();
+</script>
+</body>
 </html>

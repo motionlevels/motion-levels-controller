@@ -187,3 +187,21 @@ func TestEngineReplacementWaitsForCompletePhysicalTransaction(t *testing.T) {
 		t.Fatal("replacement did not invalidate the previous frame")
 	}
 }
+
+func TestPresentationTreatsFutureReceivedTimestampAsFresh(t *testing.T) {
+	loop, _, _ := newTestOutputLoop()
+	loop.frames.beginGeneration(1)
+	now := time.Now()
+	rgb := make([]byte, floor.RGBByteCount)
+	rgb[0] = 100
+	if !loop.frames.store(1, 9, rgb, now.Add(time.Millisecond)) {
+		t.Fatal("could not store future-timestamp test frame")
+	}
+	output, err := loop.present(now, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.DesiredFrameAge != 0 || output.FadeRatio != 0 {
+		t.Fatalf("future timestamp output=%+v, want fresh frame", output)
+	}
+}

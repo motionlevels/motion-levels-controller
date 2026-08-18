@@ -59,6 +59,17 @@ func (h *engineHub) attach(conn net.Conn) *engineSession {
 	}
 	replaceLatest(session.pressure, initialPressure)
 	if hasOutput {
+		// A replacement session must never observe the retired engine's desired
+		// frame as current. Preserve transport counters, but explicitly describe
+		// the new generation as awaiting its first frame. The output loop will
+		// publish the first post-attach black transaction on its next refresh.
+		lastOutput.DesiredSequence = 0
+		lastOutput.DesiredFrameAge = -1
+		lastOutput.FadeRatio = 1
+		lastOutput.PressureSequence = initialPressure.Sequence
+		lastOutput.PressureBits = initialPressure.Bits
+		lastOutput.PhysicalFrameWasSent = false
+		lastOutput.ObservedAt = time.Now()
 		replaceLatest(session.output, lastOutput)
 	}
 	return session
@@ -103,8 +114,9 @@ func (h *engineHub) publishOutput(snapshot OutputSnapshot) {
 }
 
 type engineServer struct {
-	cfg Config
-	hub *engineHub
+	cfg   Config
+	hub   *engineHub
+	ready func()
 }
 
 func (s *engineServer) run(ctx context.Context) error {
@@ -114,6 +126,9 @@ func (s *engineServer) run(ctx context.Context) error {
 	}
 	defer listener.Close()
 	log.Printf("engine stream: %s", listener.Addr())
+	if s.ready != nil {
+		s.ready()
+	}
 
 	go func() {
 		<-ctx.Done()

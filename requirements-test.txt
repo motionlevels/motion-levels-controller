@@ -1,0 +1,2 @@
+# Browser-only validation dependency. Keep aligned with the browser installed in CI.
+playwright==1.57.0
