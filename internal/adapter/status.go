@@ -27,13 +27,15 @@ type runtimeStatus struct {
 	actualFPSBits    atomic.Uint64
 	fadeBits         atomic.Uint32
 
-	udpWriteErrors    atomic.Uint64
-	sourceAssigned    atomic.Bool
-	udpStatusKnown    atomic.Bool
-	udpWriteAvailable atomic.Bool
-	lastUDPSuccessAt  atomic.Int64
-	lastFloorPacketAt atomic.Int64
-	pressureSequence  atomic.Uint64
+	udpWriteErrors      atomic.Uint64
+	sourceAssigned      atomic.Bool
+	udpStatusKnown      atomic.Bool
+	udpWriteAvailable   atomic.Bool
+	lastUDPSuccessAt    atomic.Int64
+	lastFloorPacketAt   atomic.Int64
+	pressureSequence    atomic.Uint64
+	channelPackets      [floor.DefaultChannels]atomic.Uint64
+	lastChannelPacketAt [floor.DefaultChannels]atomic.Int64
 }
 
 func newRuntimeStatus() *runtimeStatus {
@@ -43,6 +45,13 @@ func newRuntimeStatus() *runtimeStatus {
 func (s *runtimeStatus) markEngineConnected() {
 	s.engineConnected.Store(true)
 	s.engineConnections.Add(1)
+}
+
+func (s *runtimeStatus) markChannelPacket(channel int, observedAt time.Time) {
+	if channel >= 0 && channel < floor.DefaultChannels {
+		s.channelPackets[channel].Add(1)
+		s.lastChannelPacketAt[channel].Store(observedAt.UnixNano())
+	}
 }
 
 func (s *runtimeStatus) setEngineConnected(value bool) {
@@ -258,6 +267,26 @@ func newHTTPHandler(cfg Config, status *runtimeStatus, pressure *pressureStore) 
 		p.metric("motion_levels_controller_floor_seen_recently", "Whether a valid floor packet was observed within the configured window.", "gauge", boolNumber(snapshot.FloorSeenRecently))
 		p.metric("motion_levels_controller_last_floor_packet_age_seconds", "Age of the most recent valid floor packet.", "gauge", durationSeconds(snapshot.LastFloorPacketAge))
 		p.metric("motion_levels_controller_pressure_sequence", "Canonical pressure-state sequence.", "gauge", snapshot.PressureSequence)
+		for channel := 0; channel < floor.DefaultChannels; channel++ {
+			chStr := strconv.Itoa(channel)
+			p.metric("motion_levels_controller_channel_packets_total", "Total valid floor sensor packets observed for this hardware channel.", "counter", status.channelPackets[channel].Load(), "channel", chStr)
+		}
+		for channel := 0; channel < floor.DefaultChannels; channel++ {
+			chStr := strconv.Itoa(channel)
+			chAge := time.Duration(-1)
+			if last := status.lastChannelPacketAt[channel].Load(); last > 0 {
+				chAge = now.Sub(time.Unix(0, last))
+			}
+			p.metric("motion_levels_controller_channel_last_seen_seconds", "Age of the most recent sensor packet for this hardware channel.", "gauge", durationSeconds(chAge), "channel", chStr)
+		}
+		for channel := 0; channel < floor.DefaultChannels; channel++ {
+			chStr := strconv.Itoa(channel)
+			chHealthy := false
+			if last := status.lastChannelPacketAt[channel].Load(); last > 0 {
+				chHealthy = now.Sub(time.Unix(0, last)) <= cfg.FloorSeenWindow
+			}
+			p.metric("motion_levels_controller_channel_healthy", "Whether this hardware channel was observed within the floor-seen window.", "gauge", boolNumber(chHealthy), "channel", chStr)
+		}
 		floorStats := pressure.statsSnapshot(now)
 		p.metric("motion_levels_controller_active_pressed_tiles", "Number of currently pressed tiles on the physical floor.", "gauge", floorStats.ActivePressedTiles)
 		for y := 0; y < floor.GridHeight; y++ {

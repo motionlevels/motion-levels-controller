@@ -22,7 +22,7 @@ func TestDecodeSensorPacketMapsOnlyInstalledSensors(t *testing.T) {
 	packet[3+physical.Channel*sensorChannelStride+physical.Position] = 0xCC
 	packet[3+physical.Channel*sensorChannelStride+100] = 0xCC // outside installed 64 sensors
 
-	changes, err := decodeSensorPacket(packet, floor.Rotation0)
+	changes, _, err := decodeSensorPacket(packet, floor.Rotation0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestDecodeSensorPacketAppliesHalfTurn(t *testing.T) {
 	physical := floor.LogicalToPhysical(x, y, floor.Rotation180)
 	packet[3+physical.Channel*sensorChannelStride+physical.Position] = 0xCC
 
-	changes, err := decodeSensorPacket(packet, floor.Rotation180)
+	changes, _, err := decodeSensorPacket(packet, floor.Rotation180)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,5 +167,8 @@ func TestSensorReaderEndToEnd(t *testing.T) {
 	tileIdx := y*floor.GridWidth + x
 	if snap.Bits[tileIdx/8]&(1<<uint(tileIdx%8)) == 0 {
 		t.Fatalf("expected tile (%d,%d) bit to be set in pressure bitset", x, y)
+	}
+	if count := status.channelPackets[phys.Channel].Load(); count != 1 {
+		t.Fatalf("channel %d packets = %d, want 1", phys.Channel, count)
 	}
 }

@@ -75,12 +75,15 @@ func (r *sensorReader) run(ctx context.Context) error {
 			r.status.markFloorPacket(observedAt)
 			log.Printf("floor handshake from %s (%d bytes)", remote, count)
 		case 0x88:
-			changes, err := decodeSensorPacket(packet, r.cfg.FloorRotation)
+			changes, channelCount, err := decodeSensorPacket(packet, r.cfg.FloorRotation)
 			if err != nil {
 				r.logWarning("invalid floor sensor packet from %s: %v", remote, err)
 				continue
 			}
 			r.status.markFloorPacket(observedAt)
+			for channel := 0; channel < channelCount; channel++ {
+				r.status.markChannelPacket(channel, observedAt)
+			}
 			if snapshot, changed := r.pressure.apply(changes, observedAt); changed {
 				r.status.markPressure(snapshot.Sequence)
 				r.hub.publishPressure(snapshot)
@@ -91,13 +94,13 @@ func (r *sensorReader) run(ctx context.Context) error {
 	}
 }
 
-func decodeSensorPacket(packet []byte, rotation floor.Rotation) ([]pressureChange, error) {
+func decodeSensorPacket(packet []byte, rotation floor.Rotation) ([]pressureChange, int, error) {
 	if len(packet) < 3+sensorChannelStride {
-		return nil, fmt.Errorf("sensor packet is %d bytes, want at least %d", len(packet), 3+sensorChannelStride)
+		return nil, 0, fmt.Errorf("sensor packet is %d bytes, want at least %d", len(packet), 3+sensorChannelStride)
 	}
 	controller := int(packet[1])
 	if controller < 0 || controller >= floor.DefaultControllers {
-		return nil, fmt.Errorf("controller %d is outside configured range", controller)
+		return nil, 0, fmt.Errorf("controller %d is outside configured range", controller)
 	}
 
 	channelCount := min((len(packet)-3)/sensorChannelStride, floor.DefaultChannels)
@@ -120,10 +123,10 @@ func decodeSensorPacket(packet []byte, rotation floor.Rotation) ([]pressureChang
 			}
 			x, y := floor.PhysicalToLogical(controller, channel, position, rotation)
 			if !floor.InLogicalBounds(x, y) {
-				return nil, fmt.Errorf("physical coordinate controller=%d channel=%d position=%d mapped outside the logical floor", controller, channel, position)
+				return nil, 0, fmt.Errorf("physical coordinate controller=%d channel=%d position=%d mapped outside the logical floor", controller, channel, position)
 			}
 			changes = append(changes, pressureChange{X: x, Y: y, Pressed: pressed})
 		}
 	}
-	return changes, nil
+	return changes, channelCount, nil
 }

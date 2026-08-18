@@ -49,6 +49,7 @@ func TestMetricsUseBoundedLabels(t *testing.T) {
 	pressure := &pressureStore{observedAt: time.Now()}
 	pressure.apply([]pressureChange{{X: 3, Y: 7, Pressed: true}}, time.Now())
 	status.markEngineConnected()
+	status.markChannelPacket(2, time.Now())
 
 	handler := newHTTPHandler(cfg, status, pressure)
 	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -64,6 +65,11 @@ func TestMetricsUseBoundedLabels(t *testing.T) {
 		"motion_levels_controller_desired_frame_age_seconds -1",
 		"motion_levels_controller_last_udp_success_age_seconds -1",
 		"motion_levels_controller_last_floor_packet_age_seconds -1",
+		`motion_levels_controller_channel_packets_total{channel="2"} 1`,
+		`motion_levels_controller_channel_packets_total{channel="0"} 0`,
+		`motion_levels_controller_channel_healthy{channel="2"} 1`,
+		`motion_levels_controller_channel_healthy{channel="0"} 0`,
+		`motion_levels_controller_channel_last_seen_seconds{channel="0"} -1`,
 		`motion_levels_controller_tile_presses_total{x="3",y="7"} 1`,
 		`motion_levels_controller_tile_presses_total{x="0",y="0"} 0`,
 	} {
