@@ -223,6 +223,7 @@ func newHTTPHandler(cfg Config, status *runtimeStatus) http.Handler {
 		var memory runtime.MemStats
 		runtime.ReadMemStats(&memory)
 		var p prometheusWriter
+		p.builder.Grow(2048)
 		p.metric("motion_levels_controller_up", "Whether the controller process can serve metrics.", "gauge", 1)
 		p.metric("motion_levels_controller_build_info", "Controller build information.", "gauge", 1, "revision", BuildRevision)
 		p.metric("motion_levels_controller_uptime_seconds", "Controller process uptime.", "gauge", snapshot.Uptime.Seconds())
@@ -260,7 +261,7 @@ func boolNumber(value bool) int {
 
 func durationSeconds(value time.Duration) float64 {
 	if value < 0 {
-		return 0
+		return -1
 	}
 	return value.Seconds()
 }

@@ -53,6 +53,9 @@ func TestMetricsUseBoundedLabels(t *testing.T) {
 		"motion_levels_controller_up 1",
 		"motion_levels_controller_frames_sent_total 0",
 		"motion_levels_controller_floor_seen_recently 0",
+		"motion_levels_controller_desired_frame_age_seconds -1",
+		"motion_levels_controller_last_udp_success_age_seconds -1",
+		"motion_levels_controller_last_floor_packet_age_seconds -1",
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("metrics missing %q:\n%s", expected, body)

@@ -66,7 +66,6 @@ func Run(parent context.Context, cfg Config) error {
 	}
 	cancel()
 	hub.close()
-	_ = sender.Close()
 	wait.Wait()
 	return runErr
 }

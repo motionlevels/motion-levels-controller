@@ -174,6 +174,8 @@ func (s *engineSession) run(parent context.Context) {
 func (s *engineSession) readLoop(ctx context.Context) {
 	reader := bufio.NewReaderSize(s.conn, maxWirePayload+wireHeaderSize)
 	var lastSequence uint64
+	var staleCount uint64
+	var lastStaleLog time.Time
 	for {
 		if err := s.conn.SetReadDeadline(time.Now().Add(s.hub.cfg.ReadTimeout)); err != nil {
 			return
@@ -195,7 +197,13 @@ func (s *engineSession) readLoop(ctx context.Context) {
 			return
 		}
 		if sequence <= lastSequence {
-			log.Printf("ignored stale desired frame sequence=%d last=%d", sequence, lastSequence)
+			staleCount++
+			now := time.Now()
+			if now.Sub(lastStaleLog) >= time.Second {
+				log.Printf("ignored %d stale desired frame(s) sequence=%d last=%d", staleCount, sequence, lastSequence)
+				staleCount = 0
+				lastStaleLog = now
+			}
 			continue
 		}
 		receivedAt := time.Now()

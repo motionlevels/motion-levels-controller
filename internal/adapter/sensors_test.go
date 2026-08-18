@@ -1,6 +1,9 @@
 package adapter
 
 import (
+	"bufio"
+	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -58,5 +61,111 @@ func TestSensorSnapshotCanRecoverAfterMissedTransition(t *testing.T) {
 	healed := store.snapshot()
 	if healed.Sequence != pressed.Sequence || healed.Bits != pressed.Bits {
 		t.Fatalf("canonical snapshot did not preserve state: pressed=%+v healed=%+v", pressed, healed)
+	}
+}
+
+func TestSensorReaderEndToEnd(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	udpListener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	udpAddr := udpListener.LocalAddr().String()
+	_ = udpListener.Close()
+
+	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcpAddr := tcpListener.Addr().String()
+	_ = tcpListener.Close()
+
+	cfg := DefaultConfig()
+	cfg.ReceiveAddr = udpAddr
+	cfg.EngineAddr = tcpAddr
+
+	status := newRuntimeStatus()
+	frames := &frameStore{}
+	pressure := &pressureStore{observedAt: time.Now()}
+	hub := newEngineHub(cfg, frames, pressure, status)
+	engine := &engineServer{cfg: cfg, hub: hub}
+	sensors := &sensorReader{cfg: cfg, pressure: pressure, hub: hub, status: status}
+
+	go func() { _ = engine.run(ctx) }()
+	go func() { _ = sensors.run(ctx) }()
+
+	// Connect engine TCP client
+	var conn net.Conn
+	for i := 0; i < 50; i++ {
+		c, err := net.Dial("tcp", tcpAddr)
+		if err == nil {
+			conn = c
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatal("failed to connect to engine server")
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	// Initial message upon attach is pressure snapshot (sequence 0)
+	msgType, payload, err := readWireMessage(reader)
+	if err != nil {
+		t.Fatalf("read initial wire message: %v", err)
+	}
+	if msgType != messagePressureState {
+		t.Fatalf("initial message type = %d, want %d", msgType, messagePressureState)
+	}
+	initSnap, err := decodePressureSnapshot(payload)
+	if err != nil {
+		t.Fatalf("decode initial pressure: %v", err)
+	}
+	if initSnap.Sequence != 0 {
+		t.Fatalf("initial sequence = %d, want 0", initSnap.Sequence)
+	}
+
+	// Prepare and send UDP sensor packet pressing (5, 12)
+	destUDP, err := net.ResolveUDPAddr("udp4", udpAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	senderConn, err := net.DialUDP("udp4", nil, destUDP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer senderConn.Close()
+
+	packet := make([]byte, 3+floor.DefaultChannels*sensorChannelStride)
+	packet[0] = 0x88
+	x, y := 5, 12
+	phys := floor.LogicalToPhysical(x, y, floor.Rotation0)
+	packet[3+phys.Channel*sensorChannelStride+phys.Position] = 0xCC
+
+	if _, err := senderConn.Write(packet); err != nil {
+		t.Fatalf("write UDP packet: %v", err)
+	}
+
+	// Read updated pressure message from engine TCP stream
+	msgType, payload, err = readWireMessage(reader)
+	if err != nil {
+		t.Fatalf("read updated pressure message: %v", err)
+	}
+	if msgType != messagePressureState {
+		t.Fatalf("message type = %d, want %d", msgType, messagePressureState)
+	}
+	snap, err := decodePressureSnapshot(payload)
+	if err != nil {
+		t.Fatalf("decode updated pressure: %v", err)
+	}
+	if snap.Sequence != 1 {
+		t.Fatalf("updated sequence = %d, want 1", snap.Sequence)
+	}
+	tileIdx := y*floor.GridWidth + x
+	if snap.Bits[tileIdx/8]&(1<<uint(tileIdx%8)) == 0 {
+		t.Fatalf("expected tile (%d,%d) bit to be set in pressure bitset", x, y)
 	}
 }

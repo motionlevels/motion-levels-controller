@@ -18,6 +18,25 @@ type sensorReader struct {
 	pressure *pressureStore
 	hub      *engineHub
 	status   *runtimeStatus
+
+	lastWarningLog time.Time
+	suppressedLogs int
+}
+
+func (r *sensorReader) logWarning(format string, v ...any) {
+	now := time.Now()
+	if now.Sub(r.lastWarningLog) >= time.Second {
+		if r.suppressedLogs > 0 {
+			msg := fmt.Sprintf(format, v...)
+			log.Printf("%s (suppressed %d similar warnings)", msg, r.suppressedLogs)
+			r.suppressedLogs = 0
+		} else {
+			log.Printf(format, v...)
+		}
+		r.lastWarningLog = now
+	} else {
+		r.suppressedLogs++
+	}
 }
 
 func (r *sensorReader) run(ctx context.Context) error {
@@ -58,7 +77,7 @@ func (r *sensorReader) run(ctx context.Context) error {
 		case 0x88:
 			changes, err := decodeSensorPacket(packet, r.cfg.FloorRotation)
 			if err != nil {
-				log.Printf("invalid floor sensor packet from %s: %v", remote, err)
+				r.logWarning("invalid floor sensor packet from %s: %v", remote, err)
 				continue
 			}
 			r.status.markFloorPacket(observedAt)
@@ -67,7 +86,7 @@ func (r *sensorReader) run(ctx context.Context) error {
 				r.hub.publishPressure(snapshot)
 			}
 		default:
-			log.Printf("unknown floor packet 0x%02x from %s (%d bytes)", packet[0], remote, count)
+			r.logWarning("unknown floor packet 0x%02x from %s (%d bytes)", packet[0], remote, count)
 		}
 	}
 }
