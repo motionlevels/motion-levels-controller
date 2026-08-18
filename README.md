@@ -49,7 +49,7 @@ best-effort final black transmission during orderly shutdown.
 ## Engine wire contract
 
 There is one current, unversioned full-duplex TCP contract on
-`127.0.0.1:4203`. Controller and engine revisions are promoted together in one
+`127.0.0.1:4201`. Controller and engine revisions are promoted together in one
 atomic venue release, so there is no protocol negotiation or compatibility
 matrix inside the runtime.
 
@@ -139,8 +139,8 @@ go run ./cmd/motion-levels-controller \
 
 Public flags are intentionally small:
 
-- `-http` — health and metrics listener, default `127.0.0.1:4101`;
-- `-engine` — engine stream, default `127.0.0.1:4203`;
+- `-http` — health and metrics listener, default `127.0.0.1:4200`;
+- `-engine` — engine stream, default `127.0.0.1:4201`;
 - `-recv-port` — physical floor input, default `7800`;
 - `-floor-source-ip` — exact local IPv4 source, optional;
 - `-floor-rotation` — `0` or `180`;

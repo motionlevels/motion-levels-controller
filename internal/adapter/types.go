@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	DefaultHTTPAddr      = "127.0.0.1:4101"
-	DefaultEngineAddr    = "127.0.0.1:4203"
+	DefaultHTTPAddr      = "127.0.0.1:4200"
+	DefaultEngineAddr    = "127.0.0.1:4201"
 	DefaultReceiveAddr   = ":7800"
 	DefaultBroadcastIP   = "255.255.255.255"
 	DefaultBroadcastPort = 4626

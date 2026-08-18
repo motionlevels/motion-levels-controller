@@ -26,13 +26,13 @@ in
 
     httpAddr = lib.mkOption {
       type = types.str;
-      default = "127.0.0.1:4101";
+      default = "127.0.0.1:4200";
       description = "Loopback HTTP address for health and metrics.";
     };
 
     engineAddr = lib.mkOption {
       type = types.str;
-      default = "127.0.0.1:4203";
+      default = "127.0.0.1:4201";
       description = "Loopback TCP address for the single engine stream.";
     };
 
