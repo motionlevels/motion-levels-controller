@@ -10,14 +10,17 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/motionlevels/motion-levels-controller/internal/floor"
 )
 
 type runtimeStatus struct {
 	startedAt time.Time
 
-	engineConnected atomic.Bool
-	lastFrameAt     atomic.Int64
-	desiredSequence atomic.Uint64
+	engineConnected   atomic.Bool
+	engineConnections atomic.Uint64
+	lastFrameAt       atomic.Int64
+	desiredSequence   atomic.Uint64
 
 	framesSent       atomic.Uint64
 	framesSentWindow atomic.Uint64
@@ -35,6 +38,11 @@ type runtimeStatus struct {
 
 func newRuntimeStatus() *runtimeStatus {
 	return &runtimeStatus{startedAt: time.Now()}
+}
+
+func (s *runtimeStatus) markEngineConnected() {
+	s.engineConnected.Store(true)
+	s.engineConnections.Add(1)
 }
 
 func (s *runtimeStatus) setEngineConnected(value bool) {
@@ -164,11 +172,16 @@ func (s statusSnapshot) udpWriteState() string {
 }
 
 type prometheusWriter struct {
-	builder strings.Builder
+	builder  strings.Builder
+	lastHelp string
 }
 
 func (p *prometheusWriter) metric(name, help, kind string, value any, labels ...string) {
-	_, _ = fmt.Fprintf(&p.builder, "# HELP %s %s\n# TYPE %s %s\n%s", name, help, name, kind, name)
+	if p.lastHelp != name {
+		_, _ = fmt.Fprintf(&p.builder, "# HELP %s %s\n# TYPE %s %s\n", name, help, name, kind)
+		p.lastHelp = name
+	}
+	p.builder.WriteString(name)
 	if len(labels) > 0 {
 		p.builder.WriteByte('{')
 		for index := 0; index+1 < len(labels); index += 2 {
@@ -182,7 +195,7 @@ func (p *prometheusWriter) metric(name, help, kind string, value any, labels ...
 	_, _ = fmt.Fprintf(&p.builder, " %v\n", value)
 }
 
-func newHTTPHandler(cfg Config, status *runtimeStatus) http.Handler {
+func newHTTPHandler(cfg Config, status *runtimeStatus, pressure *pressureStore) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet && request.Method != http.MethodHead {
@@ -223,13 +236,14 @@ func newHTTPHandler(cfg Config, status *runtimeStatus) http.Handler {
 		var memory runtime.MemStats
 		runtime.ReadMemStats(&memory)
 		var p prometheusWriter
-		p.builder.Grow(2048)
+		p.builder.Grow(64 * 1024)
 		p.metric("motion_levels_controller_up", "Whether the controller process can serve metrics.", "gauge", 1)
 		p.metric("motion_levels_controller_build_info", "Controller build information.", "gauge", 1, "revision", BuildRevision)
 		p.metric("motion_levels_controller_uptime_seconds", "Controller process uptime.", "gauge", snapshot.Uptime.Seconds())
 		p.metric("motion_levels_controller_go_memory_bytes", "Memory reserved by the Go runtime.", "gauge", memory.Sys)
 		p.metric("motion_levels_controller_process_goroutines", "Current number of goroutines.", "gauge", runtime.NumGoroutine())
 		p.metric("motion_levels_controller_engine_connected", "Whether an engine connection is active.", "gauge", boolNumber(snapshot.EngineConnected))
+		p.metric("motion_levels_controller_engine_connections_total", "Total engine connections accepted.", "counter", status.engineConnections.Load())
 		p.metric("motion_levels_controller_desired_frame_sequence", "Latest desired frame sequence.", "gauge", snapshot.DesiredSequence)
 		p.metric("motion_levels_controller_desired_frame_age_seconds", "Age of the latest locally received desired frame.", "gauge", durationSeconds(snapshot.DesiredFrameAge))
 		p.metric("motion_levels_controller_frames_sent_total", "Complete physical frame transactions accepted by the local UDP stack.", "counter", snapshot.FramesSent)
@@ -244,6 +258,24 @@ func newHTTPHandler(cfg Config, status *runtimeStatus) http.Handler {
 		p.metric("motion_levels_controller_floor_seen_recently", "Whether a valid floor packet was observed within the configured window.", "gauge", boolNumber(snapshot.FloorSeenRecently))
 		p.metric("motion_levels_controller_last_floor_packet_age_seconds", "Age of the most recent valid floor packet.", "gauge", durationSeconds(snapshot.LastFloorPacketAge))
 		p.metric("motion_levels_controller_pressure_sequence", "Canonical pressure-state sequence.", "gauge", snapshot.PressureSequence)
+		floorStats := pressure.statsSnapshot(now)
+		p.metric("motion_levels_controller_active_pressed_tiles", "Number of currently pressed tiles on the physical floor.", "gauge", floorStats.ActivePressedTiles)
+		for y := 0; y < floor.GridHeight; y++ {
+			yStr := strconv.Itoa(y)
+			for x := 0; x < floor.GridWidth; x++ {
+				xStr := strconv.Itoa(x)
+				idx := y*floor.GridWidth + x
+				p.metric("motion_levels_controller_tile_presses_total", "Total times this tile was stepped on.", "counter", floorStats.Tiles[idx].Presses, "x", xStr, "y", yStr)
+			}
+		}
+		for y := 0; y < floor.GridHeight; y++ {
+			yStr := strconv.Itoa(y)
+			for x := 0; x < floor.GridWidth; x++ {
+				xStr := strconv.Itoa(x)
+				idx := y*floor.GridWidth + x
+				p.metric("motion_levels_controller_tile_pressed_seconds_total", "Total cumulative seconds this tile was actively stepped on.", "counter", floorStats.Tiles[idx].PressedDurationSec, "x", xStr, "y", yStr)
+			}
+		}
 		_, _ = w.Write([]byte(p.builder.String()))
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, request *http.Request) {

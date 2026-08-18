@@ -64,11 +64,26 @@ type pressureChange struct {
 	Pressed bool
 }
 
+type TileStats struct {
+	Presses            uint64
+	PressedDurationSec float64
+}
+
+type FloorStatsSnapshot struct {
+	ActivePressedTiles uint32
+	Tiles              [floor.TileCount]TileStats
+}
+
 type pressureStore struct {
 	mu         sync.RWMutex
 	sequence   uint64
 	observedAt time.Time
 	bits       [floor.PressureByteCount]byte
+
+	activePressedTiles    uint32
+	tilePresses           [floor.TileCount]uint64
+	tilePressedDurationNs [floor.TileCount]uint64
+	tilePressedSince      [floor.TileCount]int64
 }
 
 func (s *pressureStore) apply(changes []pressureChange, observedAt time.Time) (PressureSnapshot, bool) {
@@ -87,8 +102,20 @@ func (s *pressureStore) apply(changes []pressureChange, observedAt time.Time) (P
 		}
 		if change.Pressed {
 			s.bits[index/8] |= mask
+			s.tilePresses[index]++
+			s.tilePressedSince[index] = observedAt.UnixNano()
+			s.activePressedTiles++
 		} else {
 			s.bits[index/8] &^= mask
+			if start := s.tilePressedSince[index]; start > 0 {
+				if observedAt.UnixNano() > start {
+					s.tilePressedDurationNs[index] += uint64(observedAt.UnixNano() - start)
+				}
+				s.tilePressedSince[index] = 0
+			}
+			if s.activePressedTiles > 0 {
+				s.activePressedTiles--
+			}
 		}
 		changed = true
 	}
@@ -112,6 +139,27 @@ func (s *pressureStore) snapshotLocked() PressureSnapshot {
 		ObservedAt: s.observedAt,
 		Bits:       s.bits,
 	}
+}
+
+func (s *pressureStore) statsSnapshot(now time.Time) FloorStatsSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var snapshot FloorStatsSnapshot
+	snapshot.ActivePressedTiles = s.activePressedTiles
+	nowNanos := now.UnixNano()
+
+	for index := 0; index < floor.TileCount; index++ {
+		durationNs := s.tilePressedDurationNs[index]
+		if start := s.tilePressedSince[index]; start > 0 && nowNanos > start {
+			durationNs += uint64(nowNanos - start)
+		}
+		snapshot.Tiles[index] = TileStats{
+			Presses:            s.tilePresses[index],
+			PressedDurationSec: float64(durationNs) / 1e9,
+		}
+	}
+	return snapshot
 }
 
 func replaceLatest[T any](channel chan T, value T) {

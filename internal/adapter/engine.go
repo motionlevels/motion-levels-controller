@@ -48,7 +48,7 @@ func (h *engineHub) attach(conn net.Conn) *engineSession {
 		done:       make(chan struct{}),
 	}
 	h.current = session
-	h.status.setEngineConnected(true)
+	h.status.markEngineConnected()
 	initialPressure := h.pressure.snapshot()
 	lastOutput := h.lastOutput
 	hasOutput := h.hasOutput

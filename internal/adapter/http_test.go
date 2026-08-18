@@ -11,7 +11,8 @@ import (
 func TestHTTPHandlerExposesOnlyHealthAndMetrics(t *testing.T) {
 	cfg := DefaultConfig()
 	status := newRuntimeStatus()
-	handler := newHTTPHandler(cfg, status)
+	pressure := &pressureStore{observedAt: time.Now()}
+	handler := newHTTPHandler(cfg, status, pressure)
 	for _, path := range []string{"/", "/status", "/ws", "/tv"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		response := httptest.NewRecorder()
@@ -28,7 +29,8 @@ func TestHealthSeparatesUDPWriteFromFloorPresence(t *testing.T) {
 	status.udpStatusKnown.Store(true)
 	status.udpWriteAvailable.Store(true)
 	status.lastFloorPacketAt.Store(time.Now().Add(-time.Minute).UnixNano())
-	handler := newHTTPHandler(cfg, status)
+	pressure := &pressureStore{observedAt: time.Now()}
+	handler := newHTTPHandler(cfg, status, pressure)
 	request := httptest.NewRequest(http.MethodGet, "/health", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -44,18 +46,26 @@ func TestHealthSeparatesUDPWriteFromFloorPresence(t *testing.T) {
 func TestMetricsUseBoundedLabels(t *testing.T) {
 	cfg := DefaultConfig()
 	status := newRuntimeStatus()
-	handler := newHTTPHandler(cfg, status)
+	pressure := &pressureStore{observedAt: time.Now()}
+	pressure.apply([]pressureChange{{X: 3, Y: 7, Pressed: true}}, time.Now())
+	status.markEngineConnected()
+
+	handler := newHTTPHandler(cfg, status, pressure)
 	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	body := response.Body.String()
 	for _, expected := range []string{
 		"motion_levels_controller_up 1",
+		"motion_levels_controller_engine_connections_total 1",
+		"motion_levels_controller_active_pressed_tiles 1",
 		"motion_levels_controller_frames_sent_total 0",
 		"motion_levels_controller_floor_seen_recently 0",
 		"motion_levels_controller_desired_frame_age_seconds -1",
 		"motion_levels_controller_last_udp_success_age_seconds -1",
 		"motion_levels_controller_last_floor_packet_age_seconds -1",
+		`motion_levels_controller_tile_presses_total{x="3",y="7"} 1`,
+		`motion_levels_controller_tile_presses_total{x="0",y="0"} 0`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("metrics missing %q:\n%s", expected, body)

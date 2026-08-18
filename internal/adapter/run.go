@@ -53,7 +53,7 @@ func Run(parent context.Context, cfg Config) error {
 	start("floor input", sensors.run)
 	start("floor output", output.run)
 	start("HTTP server", func(ctx context.Context) error {
-		return runHTTPServer(ctx, cfg, status)
+		return runHTTPServer(ctx, cfg, status, pressure)
 	})
 	wait.Add(1)
 	go func() {
@@ -76,10 +76,10 @@ func Run(parent context.Context, cfg Config) error {
 	return runErr
 }
 
-func runHTTPServer(ctx context.Context, cfg Config, status *runtimeStatus) error {
+func runHTTPServer(ctx context.Context, cfg Config, status *runtimeStatus, pressure *pressureStore) error {
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           newHTTPHandler(cfg, status),
+		Handler:           newHTTPHandler(cfg, status, pressure),
 		ReadHeaderTimeout: 2 * time.Second,
 	}
 	log.Printf("health and metrics: %s", cfg.HTTPAddr)
