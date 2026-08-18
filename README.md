@@ -1,136 +1,174 @@
-# Motion Levels Floor Adapter
+# Motion Levels Floor Controller
 
-This repository owns the hardware-facing floor adapter source. The venue
-repository pins an exact source revision, builds its static Linux/amd64 binary
-with the helper in this repository, and promotes that verified binary into an
-atomic venue release. This repository never deploys itself or runs an automatic
-updater. The immutable container image remains available for isolated runtime
-testing, but is not required by the native venue deployment.
+This repository contains the small hardware-facing adapter between the Motion
+Levels game engine and the physical 16×32 LED floor.
 
-The adapter uses the host network for the floor UDP protocol. Venue packaging
-is responsible for its dedicated non-root user, systemd sandbox, writable state
-boundary, and loopback-only management listeners.
+It deliberately owns only the hardware boundary:
 
-Physical floor presence is never an adapter startup prerequisite. When a
-configured floor source IP is not assigned to an active interface, the process
-keeps its HTTP and engine streams online, reports the floor output as
-unavailable, and retries the exact configured source. It does not fall back to
-another interface or emit simulated presentation. Once the source returns, UDP
-output is reacquired without restarting the process.
+- one local engine connection;
+- one latest packed RGB frame;
+- physical UDP frame and sync transmission;
+- physical pressure parsing and logical-coordinate mapping;
+- a frame-freshness watchdog with hold, fade, and black output;
+- minimal liveness and Prometheus telemetry.
 
-## Pinned native build
+Game rules, sessions, players, recordings, kiosk/display lifecycle, platform
+credentials, updates, and venue orchestration belong in other repositories.
 
-`scripts/build-native.sh` builds only from the checked-out full Git revision,
-refuses dirty controller runtime inputs, disables CGO and VCS-dependent build
-metadata, embeds that revision, and emits a Linux/amd64 binary plus canonical
-SHA-256 and JSON metadata sidecars. The same source, Go toolchain, and build
-flags produce the same binary.
+## Runtime model
 
-```sh
-make native-build
-make native-verify
+The engine sends packed row-major RGB frames. The controller keeps only the
+latest valid frame and refreshes the physical floor at 50 fps. Frames do not
+queue: a newer frame replaces an older one.
+
+Pressure is represented canonically as a 512-bit snapshot rather than as an
+unrecoverable stream of individual transitions. The controller sends the full
+snapshot when an engine connects and whenever pressure changes.
+
+Only one engine session is active. A new loopback connection replaces the old
+one immediately, invalidates its frame generation, and starts from black until
+the new engine sends its own valid frame. A delayed old connection can never
+publish into the new generation.
+
+## Safety watchdog
+
+Safety depends on locally observed frame age, not TCP connection state.
+
+The engine should resend its current desired frame periodically even when its
+visual contents have not changed. With the defaults:
+
+1. a frame lease expires after 500 ms without a new valid frame;
+2. the controller holds the last frame for another 2 seconds;
+3. it fades linearly to black over 3 seconds;
+4. black continues to be physically refreshed.
+
+A frozen engine that leaves its socket open therefore cannot hold a bright stale
+frame indefinitely. The controller also sends black on startup and makes a
+best-effort final black transmission during orderly shutdown.
+
+## Engine wire contract
+
+There is one current, unversioned full-duplex TCP contract on
+`127.0.0.1:4203`. Controller and engine revisions are promoted together in one
+atomic venue release, so there is no protocol negotiation or compatibility
+matrix inside the runtime.
+
+Every message has this fixed header:
+
+```text
+1 byte  message type
+4 bytes big-endian payload length
+N bytes payload (maximum 4096)
 ```
 
-The files are revision-qualified under `dist/`:
+All integer fields are unsigned big-endian unless stated otherwise.
 
-- `motion-levels-controller-linux-amd64-<revision>`;
-- `motion-levels-controller-linux-amd64-<revision>.sha256`;
-- `motion-levels-controller-linux-amd64-<revision>.metadata.json`.
+### Engine → controller: desired frame (`type = 1`)
 
-Ansible should check out the pinned source revision, set
-`CONTROLLER_EXPECTED_GO_VERSION` to the venue lock's exact Go version, run the
-builder, verify the metadata, then install the binary by its recorded SHA-256.
-The verifier also requires a static AMD64 ELF and confirms that the full source
-revision is embedded in the executable.
+```text
+8 bytes    positive monotonic sequence
+1536 bytes RGB (16 × 32 × 3), row-major, R/G/B order
+```
 
-## Responsibility boundary
+Any other engine message, invalid length, zero sequence, or malformed frame
+closes the connection. Stale sequences are ignored.
 
-The adapter:
+### Controller → engine: pressure state (`type = 2`)
 
-- sends and receives the physical UDP floor protocol;
-- maps logical tiles to physical controller/channel/position coordinates;
-- parses and deduplicates physical pressure;
-- keeps only the latest desired RGB frame;
-- refreshes the physical LEDs at its own cadence, normally 50 fps;
-- permits only one engine producer;
-- holds and fades the last frame safely if the engine disappears;
-- reports physical pressure, actual-presented frames, and bounded health;
-- serves only `/health` and `/metrics`.
+```text
+8 bytes  pressure sequence
+8 bytes  observed Unix nanoseconds
+64 bytes pressure bits, row-major; bit 0 is tile (0,0)
+```
 
-It deliberately has no game, player, run, session, venue identity, platform
-credential, outbound HTTP client, browser UI, WebSocket, pressure simulation,
-recording, replay, storage, or product state. Those responsibilities belong to
-the game engine and platform.
+### Controller → engine: output state (`type = 3`)
 
-The adapter remains a separate process and network boundary so engine, game,
-audio, or UI failures cannot bypass the physical watchdog or expose the floor
-hardware network.
+```text
+8 bytes  complete physical frame transactions sent
+8 bytes  desired frame sequence, or zero for black/no frame
+8 bytes  state timestamp in Unix nanoseconds
+8 bytes  desired frame age in milliseconds (signed two's-complement value)
+4 bytes  IEEE-754 float32 fade ratio
+1 byte   flags: bit 0 UDP write available, bit 1 floor seen recently,
+         bit 2 this physical frame transaction succeeded
+8 bytes  UDP write error count
+8 bytes  pressure sequence
+64 bytes pressure bits
+```
 
-## Protocols
+Output and pressure use one-element latest-value queues. A slow engine cannot
+block the physical refresh loop. Pressure messages are prioritized.
 
-Protocol v2 is preferred and uses one length-prefixed protobuf connection at
-`127.0.0.1:4203`. Both peers exchange an explicit versioned hello. The engine
-then sends packed-RGB `DesiredFrame` messages; the adapter returns physical
-`PressureEvent`, post-watchdog `PresentedFrame`, and bounded
-`AdapterStatus` messages.
+## Physical floor behavior
 
-`PresentedFrame` contains the RGB and pressure bits actually sent to the floor,
-including safety fade. The engine uses it to publish the observed live-floor
-view. Protocol v2 contains no product or platform identity fields and rejects
-oversized envelopes before allocation.
+The vendor UDP packet encoder and logical/physical wiring map remain isolated in
+`internal/floor`. The supported room orientations are 0° and 180°; LED output
+and pressure input use the same transform.
 
-The legacy v1 frame and pressure streams remain available temporarily at ports
-4201 and 4202 for rollback compatibility. Only one v1 or v2 producer is accepted
-at a time.
+One output goroutine owns all physical writes. Periodic sync packets therefore
+cannot interleave with the start/configuration/RGB/end packets of a frame
+transaction.
 
-See [docs/protocol/floor-v2.md](docs/protocol/floor-v2.md) and
-[docs/protocol/pressure-events.md](docs/protocol/pressure-events.md).
+When `-floor-source-ip` is configured, the controller uses only that exact IPv4
+source. If it is absent, the process remains online, reports output unavailable,
+and retries. It never falls back to another interface. Once the address returns,
+output is reacquired without restarting the process.
+
+A successful UDP write means the local kernel accepted the datagram; it is not a
+hardware acknowledgement. Telemetry therefore distinguishes:
+
+- exact source assigned;
+- UDP write available;
+- physical floor packet seen recently.
 
 ## Run
 
-Use loopback LED output for development:
+For development, always bind output to loopback:
 
 ```sh
 go run ./cmd/motion-levels-controller -broadcast-ip 127.0.0.1
 ```
 
-Use the default broadcast address only on the real floor network:
+Production example:
 
 ```sh
-go run ./cmd/motion-levels-controller
+go run ./cmd/motion-levels-controller \
+  -floor-source-ip 192.168.50.10 \
+  -floor-rotation 0
 ```
 
-Defaults:
+Public flags are intentionally small:
 
-- health/metrics HTTP: `127.0.0.1:4101`;
-- legacy frame listener: `127.0.0.1:4201`;
-- legacy pressure listener: `127.0.0.1:4202`;
-- protocol-v2 duplex listener: `127.0.0.1:4203`;
-- floor UDP receive socket: `:7800`;
-- logical-to-physical floor rotation: `0` (set `-floor-rotation 180` when the
-  room orientation requires a half turn; LEDs and pressure coordinates rotate
-  together);
-- LED broadcast: `255.255.255.255:4626`;
-- physical refresh: `50fps`;
-- engine disconnect: hold for `2s`, then fade to black over `3s`.
+- `-http` — health and metrics listener, default `127.0.0.1:4101`;
+- `-engine` — engine stream, default `127.0.0.1:4203`;
+- `-recv-port` — physical floor input, default `7800`;
+- `-floor-source-ip` — exact local IPv4 source, optional;
+- `-floor-rotation` — `0` or `180`;
+- `-broadcast-ip` — physical LED destination, default `255.255.255.255`.
+
+The physical destination port (4626), refresh rate (50 fps), and watchdog timing
+are controller constants because they are properties of this installation, not
+product-level runtime choices.
 
 ## Health and metrics
 
-- `GET /health`: process liveness only.
-- `GET /metrics`: bounded Prometheus signals for presentation cadence, engine
-  connectivity and frame age, safety fade, exact-source acquisition, floor
-  transport availability, UDP errors, clock/latency/jitter, memory, goroutines,
-  uptime, and build revision.
-- Every other HTTP path returns 404.
+- `GET /health` is process liveness and remains HTTP 200 when hardware is absent.
+- `GET /metrics` exposes bounded operational signals.
+- Every other path returns 404.
 
-The engine exposes the aggregate floor-adapter status for venue and platform
-consumers. Adapter metrics never use controller, session, player, or dynamic
-network identifiers as labels.
+Important metrics include locally received frame age, safety fade, complete
+frame transactions sent, exact-source assignment, UDP write state, and whether
+a valid physical floor packet was observed recently. No session, player,
+controller, or network identity is used as a metric label.
 
-`/health` remains HTTP 200 while the floor is absent because it is a process
-liveness contract. Its JSON `floor_output` field is `unknown`, `unavailable`,
-or `available`; hardware readiness must be observed, not used as a deployment
-gate. A frame is counted and returned to the engine as presented only after all
-of its physical UDP packets were sent successfully.
+## Build and validation
 
-The process handles `SIGINT` and `SIGTERM` for clean shutdown.
+```sh
+make check
+make native-build
+make native-verify
+```
+
+`make check` runs formatting checks, the race-enabled test suite, `go vet`, and a
+static Linux/amd64 build. The native build embeds the exact full Git revision and
+emits a binary, SHA-256 sidecar, and metadata document under `dist/`.

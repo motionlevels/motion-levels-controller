@@ -17,13 +17,11 @@ if len(sys.argv) != 2:
 
 metadata_path = Path(sys.argv[1]).resolve()
 document = json.loads(metadata_path.read_text(encoding="utf-8"))
-if document.get("schema") != "motion-levels-controller-native-build-v1":
+if document.get("schema") != "motion-levels-controller-native-build-v2":
     fail("unsupported controller native-build metadata schema")
 revision = document.get("sourceRevision")
 if not isinstance(revision, str) or len(revision) != 40 or any(character not in "0123456789abcdef" for character in revision):
     fail("invalid controller source revision")
-if document.get("protocol") != "v1+v2":
-    fail("controller native build does not declare protocol v1+v2")
 if document.get("target") != {"architecture": "amd64", "operatingSystem": "linux"}:
     fail("controller native build target must be linux/amd64")
 go_version = document.get("build", {}).get("goVersion")
@@ -65,5 +63,5 @@ for index in range(program_header_count):
 
 print(
     f"Verified {expected_name}: sha256={digest} revision={revision} "
-    f"protocol=v1+v2 toolchain={go_version}"
+    f"toolchain={go_version}"
 )

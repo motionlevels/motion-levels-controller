@@ -3,24 +3,18 @@ package floor
 const (
 	GridWidth             = 16
 	GridHeight            = 32
+	TileCount             = GridWidth * GridHeight
+	RGBByteCount          = TileCount * 3
+	PressureByteCount     = (TileCount + 7) / 8
 	DefaultControllers    = 1
 	DefaultChannels       = 8
 	DefaultLEDsPerChannel = 64
 )
 
 type RGB struct {
-	R byte `json:"r"`
-	G byte `json:"g"`
-	B byte `json:"b"`
+	R byte
+	G byte
+	B byte
 }
 
-type Tile struct {
-	X       int  `json:"x"`
-	Y       int  `json:"y"`
-	R       byte `json:"r"`
-	G       byte `json:"g"`
-	B       byte `json:"b"`
-	Pressed bool `json:"pressed"`
-}
-
-var Black = RGB{0, 0, 0}
+var Black = RGB{}

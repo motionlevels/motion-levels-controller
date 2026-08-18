@@ -26,46 +26,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Set up protoc
-        run: |
-          protoc_dir="${RUNNER_TEMP}/protoc-35.1"
-          mkdir -p "${protoc_dir}"
-          curl -fsSL \
-            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip \
-            -o "${protoc_dir}/protoc.zip"
-          docker run --rm \
-            -v "${protoc_dir}:/work" \
-            busybox:1.37 \
-            unzip -qo /work/protoc.zip -d /work
-          echo "${protoc_dir}/bin" >> "${GITHUB_PATH}"
+      - name: Validate runtime
+        run: make check
 
-      - name: Install protoc-gen-go
-        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-
-      - name: Validate
-        run: sh scripts/check.sh
-
-      - name: Build image
-        run: docker build --build-arg "BUILD_REVISION=${GITHUB_SHA}" -t motion-levels-controller:ci .
-
-      - name: Smoke test the confined image
-        run: |
-          docker run --detach --name motion-levels-controller-ci \
-            --network host \
-            --read-only \
-            --cap-drop ALL \
-            --security-opt no-new-privileges \
-            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
-            --tmpfs /var/lib/motion-levels/floor-controller:rw,noexec,nosuid,nodev,size=4m,uid=10001,gid=10001 \
-            motion-levels-controller:ci \
-            -broadcast-ip 127.0.0.1
-          for _ in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:4101/health && exit 0
-            sleep 1
-          done
-          docker logs motion-levels-controller-ci
-          exit 1
-
-      - name: Remove smoke-test container
-        if: always()
-        run: docker rm --force motion-levels-controller-ci || true
+      - name: Build pinned native artifact
+        run: make native-build native-verify

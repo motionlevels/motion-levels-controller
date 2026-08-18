@@ -7,7 +7,6 @@ cd "$repo_root"
 source_revision="${SOURCE_REVISION:-$(git rev-parse HEAD)}"
 output_dir="${OUTPUT_DIR:-$repo_root/dist}"
 expected_go_version="${CONTROLLER_EXPECTED_GO_VERSION:-}"
-protocol="v1+v2"
 base_name="motion-levels-controller-linux-amd64-${source_revision}"
 binary="$output_dir/$base_name"
 checksum="$binary.sha256"
@@ -27,7 +26,7 @@ if [ "$(git rev-parse HEAD)" != "$source_revision" ]; then
   echo "SOURCE_REVISION must match the checked-out commit" >&2
   exit 65
 fi
-if [ -n "$(git status --porcelain --untracked-files=all -- go.mod go.sum cmd contracts internal)" ]; then
+if [ -n "$(git status --porcelain --untracked-files=all -- go.mod cmd internal)" ]; then
   echo "Controller runtime inputs are dirty; refusing to label them as $source_revision" >&2
   exit 65
 fi
@@ -50,21 +49,21 @@ SOURCE_DATE_EPOCH=0 \
 go build \
   -buildvcs=false \
   -trimpath \
-  -ldflags="-buildid= -s -w -X main.buildRevision=$source_revision" \
+  -ldflags="-buildid= -s -w -X github.com/motionlevels/motion-levels-controller/internal/adapter.BuildRevision=$source_revision" \
   -o "$temporary" \
   ./cmd/motion-levels-controller
 chmod 0755 "$temporary"
 mv -f "$temporary" "$binary"
 trap - EXIT HUP INT TERM
 
-python3 - "$binary" "$checksum" "$metadata" "$source_revision" "$actual_go_version" "$protocol" <<'PY'
+python3 - "$binary" "$checksum" "$metadata" "$source_revision" "$actual_go_version" <<'PY'
 from hashlib import sha256
 import json
 from pathlib import Path
 import sys
 
 binary, checksum, metadata = map(Path, sys.argv[1:4])
-source_revision, go_version, protocol = sys.argv[4:7]
+source_revision, go_version = sys.argv[4:6]
 payload = binary.read_bytes()
 digest = sha256(payload).hexdigest()
 
@@ -79,8 +78,7 @@ document = {
         "goVersion": go_version,
         "reproducibleTimestamp": "1970-01-01T00:00:00Z",
     },
-    "protocol": protocol,
-    "schema": "motion-levels-controller-native-build-v1",
+    "schema": "motion-levels-controller-native-build-v2",
     "sourceRevision": source_revision,
     "target": {
         "architecture": "amd64",
