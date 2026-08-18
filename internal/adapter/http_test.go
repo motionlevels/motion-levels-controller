@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,18 +9,61 @@ import (
 	"time"
 )
 
-func TestHTTPHandlerExposesOnlyHealthAndMetrics(t *testing.T) {
+func TestHTTPHandlerWebDashboardAndEndpoints(t *testing.T) {
 	cfg := DefaultConfig()
 	status := newRuntimeStatus()
 	pressure := &pressureStore{observedAt: time.Now()}
-	handler := newHTTPHandler(cfg, status, pressure)
-	for _, path := range []string{"/", "/status", "/ws", "/tv"} {
+	frames := &frameStore{}
+	hub := newEngineHub(cfg, frames, pressure, status)
+	handler := newHTTPHandler(cfg, status, pressure, hub, frames)
+
+	// GET / and /status serve embedded HTML
+	for _, path := range []string{"/", "/status"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s status=%d, want 200", path, response.Code)
+		}
+		if !strings.Contains(response.Body.String(), "<title>Motion Levels Floor Controller</title>") {
+			t.Fatalf("GET %s did not serve expected HTML", path)
+		}
+	}
+
+	// Unknown paths 404
+	for _, path := range []string{"/unknown", "/ws", "/tv"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != http.StatusNotFound {
 			t.Fatalf("GET %s status=%d, want 404", path, response.Code)
 		}
+	}
+
+	// GET /state returns full JSON state
+	stateReq := httptest.NewRequest(http.MethodGet, "/state", nil)
+	stateResp := httptest.NewRecorder()
+	handler.ServeHTTP(stateResp, stateReq)
+	if stateResp.Code != http.StatusOK {
+		t.Fatalf("GET /state status=%d", stateResp.Code)
+	}
+	var state fullStateResponse
+	if err := json.Unmarshal(stateResp.Body.Bytes(), &state); err != nil {
+		t.Fatalf("unmarshal state response: %v", err)
+	}
+	if state.Status != "ok" || state.ConfiguredFPS != 50 {
+		t.Fatalf("unexpected state response: %+v", state)
+	}
+
+	// POST /press simulates pressure
+	pressReq := httptest.NewRequest(http.MethodPost, "/press", strings.NewReader(`{"x":2,"y":4,"pressed":true}`))
+	pressResp := httptest.NewRecorder()
+	handler.ServeHTTP(pressResp, pressReq)
+	if pressResp.Code != http.StatusNoContent {
+		t.Fatalf("POST /press status=%d, want 204", pressResp.Code)
+	}
+	if !pressure.snapshot().IsPressed(2, 4) {
+		t.Fatal("simulated press was not recorded in pressureStore")
 	}
 }
 
@@ -30,7 +74,7 @@ func TestHealthSeparatesUDPWriteFromFloorPresence(t *testing.T) {
 	status.udpWriteAvailable.Store(true)
 	status.lastFloorPacketAt.Store(time.Now().Add(-time.Minute).UnixNano())
 	pressure := &pressureStore{observedAt: time.Now()}
-	handler := newHTTPHandler(cfg, status, pressure)
+	handler := newHTTPHandler(cfg, status, pressure, nil, nil)
 	request := httptest.NewRequest(http.MethodGet, "/health", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -51,7 +95,7 @@ func TestMetricsUseBoundedLabels(t *testing.T) {
 	status.markEngineConnected()
 	status.markChannelPacket(2, time.Now())
 
-	handler := newHTTPHandler(cfg, status, pressure)
+	handler := newHTTPHandler(cfg, status, pressure, nil, nil)
 	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

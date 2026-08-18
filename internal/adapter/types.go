@@ -131,6 +131,14 @@ type PressureSnapshot struct {
 	Bits       [floor.PressureByteCount]byte
 }
 
+func (s PressureSnapshot) IsPressed(x, y int) bool {
+	if !floor.InLogicalBounds(x, y) {
+		return false
+	}
+	index := y*floor.GridWidth + x
+	return s.Bits[index/8]&(1<<uint(index%8)) != 0
+}
+
 type OutputSnapshot struct {
 	FramesSent           uint64
 	DesiredSequence      uint64

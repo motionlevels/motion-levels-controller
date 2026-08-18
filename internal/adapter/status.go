@@ -1,6 +1,8 @@
 package adapter
 
 import (
+	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -13,6 +15,9 @@ import (
 
 	"github.com/motionlevels/motion-levels-controller/internal/floor"
 )
+
+//go:embed web/index.html
+var webIndexHTML []byte
 
 type runtimeStatus struct {
 	startedAt time.Time
@@ -204,7 +209,63 @@ func (p *prometheusWriter) metric(name, help, kind string, value any, labels ...
 	_, _ = fmt.Fprintf(&p.builder, " %v\n", value)
 }
 
-func newHTTPHandler(cfg Config, status *runtimeStatus, pressure *pressureStore) http.Handler {
+type tileStatResponse struct {
+	Presses  uint64  `json:"presses"`
+	Duration float64 `json:"duration"`
+}
+
+type fullStateResponse struct {
+	Status             string             `json:"status"`
+	EngineConnected    bool               `json:"engine_connected"`
+	FPS                float64            `json:"fps"`
+	ConfiguredFPS      int                `json:"configured_fps"`
+	UDPWrite           string             `json:"udp_write"`
+	FloorSeen          bool               `json:"floor_seen"`
+	ActivePressedTiles uint32             `json:"active_pressed_tiles"`
+	PressureBase64     string             `json:"pressure_base64"`
+	RGBBase64          string             `json:"rgb_base64"`
+	TileStats          []tileStatResponse `json:"tile_stats"`
+}
+
+func buildStateResponse(now time.Time, cfg Config, status *runtimeStatus, pressure *pressureStore, frames *frameStore) fullStateResponse {
+	snapshot := status.snapshot(now, cfg)
+	var pressureBase64 string
+	var activePressedTiles uint32
+	var tileStats []tileStatResponse
+	if pressure != nil {
+		pressureSnap := pressure.snapshot()
+		pressureBase64 = base64.StdEncoding.EncodeToString(pressureSnap.Bits[:])
+		floorStats := pressure.statsSnapshot(now)
+		activePressedTiles = floorStats.ActivePressedTiles
+		tileStats = make([]tileStatResponse, floor.TileCount)
+		for i := 0; i < floor.TileCount; i++ {
+			tileStats[i] = tileStatResponse{
+				Presses:  floorStats.Tiles[i].Presses,
+				Duration: floorStats.Tiles[i].PressedDurationSec,
+			}
+		}
+	}
+	var rgbBase64 string
+	if frames != nil {
+		if frameSnap, hasFrame := frames.snapshot(); hasFrame {
+			rgbBase64 = base64.StdEncoding.EncodeToString(frameSnap.RGB[:])
+		}
+	}
+	return fullStateResponse{
+		Status:             "ok",
+		EngineConnected:    snapshot.EngineConnected,
+		FPS:                snapshot.ActualFPS,
+		ConfiguredFPS:      cfg.RefreshFPS,
+		UDPWrite:           snapshot.udpWriteState(),
+		FloorSeen:          snapshot.FloorSeenRecently,
+		ActivePressedTiles: activePressedTiles,
+		PressureBase64:     pressureBase64,
+		RGBBase64:          rgbBase64,
+		TileStats:          tileStats,
+	}
+}
+
+func newHTTPHandler(cfg Config, status *runtimeStatus, pressure *pressureStore, hub *engineHub, frames *frameStore) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet && request.Method != http.MethodHead {
@@ -287,28 +348,111 @@ func newHTTPHandler(cfg Config, status *runtimeStatus, pressure *pressureStore) 
 			}
 			p.metric("motion_levels_controller_channel_healthy", "Whether this hardware channel was observed within the floor-seen window.", "gauge", boolNumber(chHealthy), "channel", chStr)
 		}
-		floorStats := pressure.statsSnapshot(now)
-		p.metric("motion_levels_controller_active_pressed_tiles", "Number of currently pressed tiles on the physical floor.", "gauge", floorStats.ActivePressedTiles)
-		for y := 0; y < floor.GridHeight; y++ {
-			yStr := strconv.Itoa(y)
-			for x := 0; x < floor.GridWidth; x++ {
-				xStr := strconv.Itoa(x)
-				idx := y*floor.GridWidth + x
-				p.metric("motion_levels_controller_tile_presses_total", "Total times this tile was stepped on.", "counter", floorStats.Tiles[idx].Presses, "x", xStr, "y", yStr)
+		if pressure != nil {
+			floorStats := pressure.statsSnapshot(now)
+			p.metric("motion_levels_controller_active_pressed_tiles", "Number of currently pressed tiles on the physical floor.", "gauge", floorStats.ActivePressedTiles)
+			for y := 0; y < floor.GridHeight; y++ {
+				yStr := strconv.Itoa(y)
+				for x := 0; x < floor.GridWidth; x++ {
+					xStr := strconv.Itoa(x)
+					idx := y*floor.GridWidth + x
+					p.metric("motion_levels_controller_tile_presses_total", "Total times this tile was stepped on.", "counter", floorStats.Tiles[idx].Presses, "x", xStr, "y", yStr)
+				}
 			}
-		}
-		for y := 0; y < floor.GridHeight; y++ {
-			yStr := strconv.Itoa(y)
-			for x := 0; x < floor.GridWidth; x++ {
-				xStr := strconv.Itoa(x)
-				idx := y*floor.GridWidth + x
-				p.metric("motion_levels_controller_tile_pressed_seconds_total", "Total cumulative seconds this tile was actively stepped on.", "counter", floorStats.Tiles[idx].PressedDurationSec, "x", xStr, "y", yStr)
+			for y := 0; y < floor.GridHeight; y++ {
+				yStr := strconv.Itoa(y)
+				for x := 0; x < floor.GridWidth; x++ {
+					xStr := strconv.Itoa(x)
+					idx := y*floor.GridWidth + x
+					p.metric("motion_levels_controller_tile_pressed_seconds_total", "Total cumulative seconds this tile was actively stepped on.", "counter", floorStats.Tiles[idx].PressedDurationSec, "x", xStr, "y", yStr)
+				}
 			}
 		}
 		_, _ = w.Write([]byte(p.builder.String()))
 	})
+
+	mux.HandleFunc("/state", func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json")
+		res := buildStateResponse(time.Now(), cfg, status, pressure, frames)
+		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	mux.HandleFunc("/events", func(w http.ResponseWriter, request *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		send := func() error {
+			res := buildStateResponse(time.Now(), cfg, status, pressure, frames)
+			data, err := json.Marshal(res)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(w, "event: state\ndata: %s\n\n", data); err != nil {
+				return err
+			}
+			flusher.Flush()
+			return nil
+		}
+
+		if err := send(); err != nil {
+			return
+		}
+
+		ticker := time.NewTicker(50 * time.Millisecond) // 20 fps SSE stream
+		defer ticker.Stop()
+		for {
+			select {
+			case <-request.Context().Done():
+				return
+			case <-ticker.C:
+				if err := send(); err != nil {
+					return
+				}
+			}
+		}
+	})
+
+	mux.HandleFunc("/press", func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			X       int  `json:"x"`
+			Y       int  `json:"y"`
+			Pressed bool `json:"pressed"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if pressure != nil {
+			now := time.Now()
+			snapshot, changed := pressure.apply([]pressureChange{{X: req.X, Y: req.Y, Pressed: req.Pressed}}, now)
+			if changed {
+				status.markPressure(snapshot.Sequence)
+				if hub != nil {
+					hub.publishPressure(snapshot)
+				}
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, request *http.Request) {
-		http.NotFound(w, request)
+		if request.URL.Path != "/" && request.URL.Path != "/status" {
+			http.NotFound(w, request)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(webIndexHTML)
 	})
 	return mux
 }
